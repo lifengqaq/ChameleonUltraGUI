@@ -23,6 +23,8 @@ jobs:
         run: >-
           flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings
           lib/gui/menu/tools/cpu_card.dart lib/helpers/iso14443_4.dart
+          lib/gui/menu/tools/cpu_emv_summary.dart lib/helpers/cpu_emv.dart
+          test/cpu_emv_test.dart
           lib/helpers/hf14a4_slot.dart lib/bridge/chameleon.dart
       - name: Build native library required by the full test suite
         run: |
@@ -35,7 +37,7 @@ jobs:
       - name: Produce formatting patch
         if: always()
         run: |
-          dart format lib/helpers/iso14443_4.dart lib/helpers/hf14a4_slot.dart lib/gui/menu/tools/cpu_card.dart test/iso14443_4_test.dart
+          dart format lib/helpers/iso14443_4.dart lib/helpers/hf14a4_slot.dart lib/gui/menu/tools/cpu_card.dart test/iso14443_4_test.dart lib/helpers/cpu_emv.dart lib/gui/menu/tools/cpu_emv_summary.dart test/cpu_emv_test.dart
           git diff --binary > cpu-format.patch
       - uses: actions/upload-artifact@v7
         if: always()
