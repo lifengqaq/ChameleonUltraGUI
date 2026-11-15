@@ -24,10 +24,14 @@ jobs:
           flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings
           lib/gui/menu/tools/cpu_card.dart lib/helpers/iso14443_4.dart
           lib/helpers/hf14a4_slot.dart lib/bridge/chameleon.dart
-      - name: Run CPU and compatibility regressions
-        run: >-
-          flutter test test/iso14443_4_test.dart test/hf14a4_card_type_test.dart
-          test/raw_commands_test.dart test/plugin_extensions_test.dart
+      - name: Build native library required by the full test suite
+        run: |
+          cmake -S src -B build/native-recovery -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/native-recovery --parallel 2
+      - name: Run full GUI and compatibility regressions
+        env:
+          LIBRECOVERY_PATH: ${{ github.workspace }}/chameleonultragui/build/native-recovery/librecovery.so
+        run: flutter test
       - name: Produce formatting patch
         if: always()
         run: |
