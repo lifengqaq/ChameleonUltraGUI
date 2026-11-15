@@ -28,6 +28,7 @@ class CardEditMenu extends StatefulWidget {
 
 class CardEditMenuState extends State<CardEditMenu> {
   TagType selectedType = TagType.unknown;
+  String cpuApplication = 'generic';
   TextEditingController nameController = TextEditingController();
   TextEditingController uidController = TextEditingController();
   TextEditingController sakController = TextEditingController();
@@ -88,6 +89,7 @@ class CardEditMenuState extends State<CardEditMenu> {
   void initState() {
     super.initState();
     selectedType = widget.tagSave.tag;
+    cpuApplication = widget.tagSave.extraData.cpuApplication;
     uidController.text = widget.tagSave.uid;
     sakController.text = bytesToHexSpace(u8ToBytes(widget.tagSave.sak));
     atqaController.text = bytesToHexSpace(widget.tagSave.atqa);
@@ -328,6 +330,16 @@ class CardEditMenuState extends State<CardEditMenu> {
                   appState.changesMade();
                 },
               ),
+              if (selectedType == TagType.hf14a4) ...[
+                DropdownButtonFormField<String>(value: cpuApplication,
+                  decoration: InputDecoration(labelText: localizations.cpu_application_type),
+                  items: [
+                    DropdownMenuItem(value: 'generic', child: Text(localizations.cpu_application_generic)),
+                    DropdownMenuItem(value: 'emv', child: Text(localizations.cpu_application_emv)),
+                    DropdownMenuItem(value: 'ndef', child: Text(localizations.cpu_application_ndef)),
+                  ], onChanged: (value) { if (value != null) setState(() => cpuApplication = value); }),
+                Text(localizations.cpu_application_help),
+              ],
               Visibility(
                 visible: selectedType != TagType.unknown,
                 child: Column(children: [
@@ -606,6 +618,8 @@ class CardEditMenuState extends State<CardEditMenu> {
                 atqa: hexToBytes(atqaController.text),
                 uid: finalUid,
                 extraData: CardSaveExtra(
+                  cpuApplication: selectedType == TagType.hf14a4 ? cpuApplication : 'generic',
+                  cpuDump: widget.tagSave.extraData.cpuDump,
                   ultralightSignature:
                       hexToBytes(ultralightSignatureController.text),
                   ultralightVersion:

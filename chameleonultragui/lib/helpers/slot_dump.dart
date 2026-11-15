@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'package:chameleonultragui/helpers/hf14a4_slot.dart';
 
 import 'package:chameleonultragui/bridge/chameleon.dart';
 import 'package:chameleonultragui/helpers/definitions.dart';
@@ -11,6 +12,7 @@ import 'package:chameleonultragui/sharedprefsprovider.dart';
 /// active slot's emulator memory and returns it as a [CardSave].
 Future<CardSave> readHfDumpFromSlot(
     ChameleonCommunicator communicator, String name, TagType tagType) async {
+  if (tagType == TagType.hf14a4) return readHf14a4SlotIdentity(communicator, name);
   CardData data = await communicator.mf1GetAntiCollData();
 
   if (isMifareUltralight(tagType)) {
@@ -106,7 +108,11 @@ Future<void> writeHfDumpToSlot(
     {void Function(int progress)? onProgress}) async {
   await communicator.activateSlot(slot);
 
-  if (isMifareUltralight(tagType)) {
+  if (tagType == TagType.hf14a4) {
+    final identity = await communicator.mf1GetAntiCollData();
+    await writeHf14a4SlotIdentity(communicator, CardSave(uid: bytesToHexSpace(identity.uid),
+      name: '', tag: tagType, sak: identity.sak, atqa: identity.atqa, ats: identity.ats, data: dumpData));
+  } else if (isMifareUltralight(tagType)) {
     int pageCount = mfUltralightGetPagesCount(tagType);
 
     for (var page = 0; page < pageCount && dumpData.length > page; page++) {

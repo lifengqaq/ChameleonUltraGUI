@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'package:chameleonultragui/gui/menu/pages/cpu_data_editor.dart';
 
 import 'package:chameleonultragui/gui/component/error_page.dart';
 import 'package:chameleonultragui/gui/menu/dialogs/slot/edit.dart';
@@ -135,7 +136,9 @@ class SlotSettingsState extends State<SlotSettings> {
     await Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (BuildContext context) => DumpEditor(
+        builder: (BuildContext context) => slotTypes.hf == TagType.hf14a4
+          ? CpuDataEditor(card: card, onSave: (updated) => editedDump = updated.data)
+          : DumpEditor(
           cardSave: card,
           onSave: (dumpData) {
             editedDump = dumpData;
@@ -249,7 +252,7 @@ class SlotSettingsState extends State<SlotSettings> {
                             icon: const Icon(Icons.edit),
                           ),
                           IconButton(
-                            onPressed: (isMifareClassic(slotTypes.hf) ||
+                            onPressed: (slotTypes.hf == TagType.hf14a4 || isMifareClassic(slotTypes.hf) ||
                                     isMifareUltralight(slotTypes.hf))
                                 ? openHfDumpEditor
                                 : null,

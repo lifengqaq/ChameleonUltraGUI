@@ -1,3 +1,4 @@
+import 'package:chameleonultragui/gui/menu/pages/cpu_data_editor.dart';
 import 'package:chameleonultragui/gui/menu/dialogs/card/edit.dart';
 import 'package:chameleonultragui/gui/menu/dialogs/dictionary/export.dart';
 import 'package:chameleonultragui/gui/menu/pages/dump_editor.dart';
@@ -296,6 +297,21 @@ class CardViewMenuState extends State<CardViewMenu> {
                 },
                 icon: const Icon(Icons.copy_all),
               ),
+              if (currentSavedCard.tag == TagType.hf14a4)
+                IconButton(tooltip: localizations.cpu_data_title,
+                  icon: const Icon(Icons.edit_document),
+                  onPressed: () async {
+                    await Navigator.push(context, MaterialPageRoute(builder: (_) => CpuDataEditor(
+                      card: currentSavedCard, onSave: (updated) {
+                        final cards = appState.sharedPreferencesProvider.getCards();
+                        final index = cards.indexWhere((card) => card.id == updated.id);
+                        if (index < 0) throw StateError('Card was removed while editing');
+                        cards[index] = updated;
+                        appState.sharedPreferencesProvider.setCards(cards);
+                        appState.changesMade();
+                      })));
+                    if (mounted) _refreshCardData();
+                  }),
               if (isMifareClassic(currentSavedCard.tag) ||
                   isMifareUltralight(currentSavedCard.tag))
                 IconButton(

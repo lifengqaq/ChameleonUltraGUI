@@ -27,6 +27,8 @@ class ChameleonCommunicator {
   List<int> commandQueue = [];
   // The protocol has no request IDs: consume a late reply before reusing its command.
   final Set<int> _timedOutCommands = {};
+  bool _sensitiveCommand(int command) => command == ChameleonCommand.hf14a4ReaderApdu.value ||
+    command == ChameleonCommand.hf14a4Filesystem.value;
 
   final Logger log;
 
@@ -77,7 +79,10 @@ class ChameleonCommunicator {
   }
 
   Future<void> onSerialMessage(List<int> message) async {
-    log.t("Received: ${bytesToHex(Uint8List.fromList(message))}");
+    final sensitive = commandQueue.any(_sensitiveCommand) ||
+      _timedOutCommands.any(_sensitiveCommand) || _sensitiveCommand(dataCmd);
+    log.t(sensitive ? 'Received: [CPU sensitive payload redacted]' :
+      "Received: ${bytesToHex(Uint8List.fromList(message))}");
 
     for (var byte in message) {
       dataBuffer.add(byte);
@@ -114,7 +119,7 @@ class ChameleonCommunicator {
               status: dataStatus,
               data: Uint8List.fromList(dataResponse));
           log.d(
-              "Received message: command = ${message.command}, status = ${message.status}, data = ${bytesToHex(message.data)}");
+              "Received message: command = ${message.command}, status = ${message.status}, data = ${_sensitiveCommand(message.command) ? '[redacted]' : bytesToHex(message.data)}");
           dataPosition = 0;
           dataBuffer = [];
           if (!_timedOutCommands.remove(message.command)) {
@@ -183,7 +188,8 @@ class ChameleonCommunicator {
     commandQueue.add(command);
     try {
       final frame = _makeRawDataFrameBytes(command, 0, data);
-      log.t("Sending: ${bytesToHex(frame)}");
+      log.t(_sensitiveCommand(command) ? 'Sending: command $command [CPU sensitive payload redacted]' :
+        "Sending: ${bytesToHex(frame)}");
       if (skipReceive) {
         // Reboot/reset commands may disconnect before the write completes.
         try {
@@ -1582,6 +1588,14 @@ class ChameleonCommunicator {
     }
     validateCpuRules(result);
     return result;
+  }
+
+  Future<void> hf14a4RequireFilesystemSecurity() async {
+    final capabilities = await _cpuCommand(ChameleonCommand.hf14a4Filesystem,
+      data: Uint8List.fromList([7]));
+    if (capabilities.length != 2 || capabilities[0] < 2 || (capabilities[1] & 3) != 3) {
+      throw StateError('请先升级配套认证固件：当前设备不支持 CFS v2 PIN/DES 认证');
+    }
   }
 
   Future<Uint8List?> hf14a4ReadFilesystem() => readCpuFilesystem((data) =>

@@ -176,10 +176,9 @@ void main() {
     ));
     await tester.pumpAndSettle();
     expect(find.text('Read'), findsNothing);
-    expect(find.text('No emulation profile yet'), findsOneWidget);
+    expect(find.text('No emulation profile yet'), findsNothing);
+    expect(find.byType(TabBar), findsNothing);
     expect(find.text('CPU card'), findsNothing);
-    await tester.tap(find.text('Advanced'));
-    await tester.pumpAndSettle();
     expect(find.byType(TextField), findsOneWidget);
     expect(find.text('JSON'), findsNothing);
     expect(tester.takeException(), isNull);

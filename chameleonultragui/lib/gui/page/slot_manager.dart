@@ -153,12 +153,16 @@ class SlotManagerPageState extends State<SlotManagerPage> {
       appState.changesMade();
       refreshSlot();
     } else if (card.tag == TagType.hf14a4) {
+      validateCpuCardForDevice(card);
       final image = cpuFilesystemFromData(card.data);
       if (image == null) {
         cpuRulesFromData(card.data);
       } else if (!(await appState.communicator!.getDeviceCapabilities())
           .contains(ChameleonCommand.hf14a4Filesystem.value)) {
         throw StateError('请先升级配套固件：当前设备缺少 CPU 文件系统命令 6009');
+      }
+      if (image != null && image[4] == 2) {
+        await appState.communicator!.hf14a4RequireFilesystemSecurity();
       }
       close(context, card.name);
       setUploadState(0);

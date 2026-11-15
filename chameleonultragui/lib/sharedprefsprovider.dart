@@ -347,6 +347,8 @@ class CardSaveExtra {
   Uint8List ultralightSignature;
   Uint8List ultralightVersion;
   List<int> ultralightCounters;
+  String cpuApplication;
+  Map<String, dynamic> cpuDump;
 
   factory CardSaveExtra.import(Map<String, dynamic> data) {
     List<int> readBytes(Map<String, dynamic> data, String key) {
@@ -363,7 +365,10 @@ class CardSaveExtra {
     return CardSaveExtra(
         ultralightSignature: Uint8List.fromList(ultralightSignature),
         ultralightVersion: Uint8List.fromList(ultralightVersion),
-        ultralightCounters: ultralightCounters);
+        ultralightCounters: ultralightCounters,
+        cpuApplication: const ['generic', 'emv', 'ndef'].contains(data['cpuApplication'])
+          ? data['cpuApplication'] as String : 'generic',
+        cpuDump: data['cpuDump'] is Map ? Map<String, dynamic>.from(data['cpuDump'] as Map) : {});
   }
 
   Map<String, dynamic> export() {
@@ -381,16 +386,20 @@ class CardSaveExtra {
       json['ultralightCounters'] = ultralightCounters;
     }
 
+    if (cpuApplication != 'generic') json['cpuApplication'] = cpuApplication;
+    if (cpuDump.isNotEmpty) json['cpuDump'] = cpuDump;
     return json;
   }
 
   CardSaveExtra(
       {Uint8List? ultralightSignature,
       Uint8List? ultralightVersion,
-      List<int>? ultralightCounters})
+      List<int>? ultralightCounters, this.cpuApplication = 'generic',
+      Map<String, dynamic>? cpuDump})
       : ultralightSignature = ultralightSignature ?? Uint8List(0),
         ultralightVersion = ultralightVersion ?? Uint8List(0),
-        ultralightCounters = ultralightCounters ?? <int>[];
+        ultralightCounters = ultralightCounters ?? <int>[],
+        cpuDump = cpuDump ?? <String, dynamic>{};
 }
 
 class SharedPreferencesProvider extends ChangeNotifier {

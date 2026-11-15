@@ -138,12 +138,10 @@ class _RawCommandsMenuState extends State<RawCommandsMenu> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       if (widget.hf) ...[
-                        Wrap(spacing: 8, children: [for (var i = 0; i < 2; i++) OutlinedButton.icon(
+                        OutlinedButton.icon(
                           onPressed: _busy ? null : () => showDialog<void>(context: context,
-                            barrierDismissible: false, builder: (_) => CpuCardMenu(initialTab: i)),
-                          icon: const Icon(Icons.nfc),
-                          label: Text(i == 0 ? l.cpu_emulation_title : l.cpu_apdu_tools),
-                        )]),
+                            barrierDismissible: false, builder: (_) => const CpuCardMenu()),
+                          icon: const Icon(Icons.nfc), label: Text(l.cpu_apdu_tools)),
                         const Divider(height: 24),
                       ],
                       if (!connected) Text(l.device_required),

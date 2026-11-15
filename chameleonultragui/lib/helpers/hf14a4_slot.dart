@@ -11,6 +11,7 @@ Future<void> writeHf14a4SlotIdentity(
   ChameleonCommunicator communicator,
   CardSave card,
 ) async {
+  validateCpuCardForDevice(card);
   final image = card.tag == TagType.hf14a4 ? cpuFilesystemFromData(card.data) : null;
   final pairs = card.tag == TagType.hf14a4 && image == null
       ? cpuRulesFromData(card.data) : <CpuApduPair>[];
@@ -24,6 +25,7 @@ Future<void> writeHf14a4SlotIdentity(
     throw StateError('APDU table upload requires updated ISO-DEP firmware');
   }
   if (image != null) {
+    if (image[4] == 2) await communicator.hf14a4RequireFilesystemSecurity();
     await communicator.hf14a4WriteFilesystem(image);
   } else if (supported) {
     await communicator.hf14a4ClearStaticResponses();
@@ -75,5 +77,11 @@ Future<void> prepareHf14a4Slot(ChameleonCommunicator communicator, int slot) asy
   if (types[slot].hf != TagType.hf14a4) {
     await communicator.setSlotType(slot,TagType.hf14a4);
     await communicator.setDefaultDataToSlot(slot,TagType.hf14a4);
+  }
+}
+
+void validateCpuCardForDevice(CardSave card) {
+  if (card.tag == TagType.hf14a4 && card.extraData.cpuDump['archiveOnly'] == true) {
+    throw StateError('此卡是归档转储，无法作为 UID-only 卡上传。请在编辑数据中明确创建可容纳的模拟文件。');
   }
 }

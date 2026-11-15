@@ -60,6 +60,7 @@ dependencies:
   protobuf: ^6.0.0
   collection: ^1.19.1
   crypto: ^3.0.7
+  pointycastle: 4.0.0
   flutter_colorpicker: ^1.1.0
   package_info_plus: ^10.2.1
   url_launcher: ^6.3.2

@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'package:chameleonultragui/helpers/cpu_security.dart';
 
 const cpuFilesystemCapacity = 3252;
 const _magic = [0x43, 0x46, 0x53, 0x31];
@@ -32,12 +33,14 @@ class CpuFileNode {
     if (fid.length != 2) throw const FormatException('FID 需要 2 字节，例如 3F00');
     final type = ['df', 'binary', 'records'].indexOf(value['type']?.toString().toLowerCase() ?? '');
     final rights = value['access'] ?? <String>[];
-    if (rights is! List || rights.any((v) => v != 'read' && v != 'write')) {
+    if (rights is! List || rights.any((v) => !const ['read','write','read-pin','write-pin','read-key','write-key'].contains(v))) {
       throw const FormatException('access 只支持 read、write');
     }
     return CpuFileNode(parent: _integer(value['parent'], 255), type: type,
       fid: fid[0] << 8 | fid[1], sfi: _integer(value['sfi'], 0),
-      access: (rights.contains('read') ? 1 : 0) | (rights.contains('write') ? 2 : 0),
+      access: (rights.contains('read') ? 1 : 0) | (rights.contains('write') ? 2 : 0) |
+        (rights.contains('read-pin') ? 4 : 0) | (rights.contains('write-pin') ? 8 : 0) |
+        (rights.contains('read-key') ? 16 : 0) | (rights.contains('write-key') ? 32 : 0),
       recordLength: _integer(value['recordLength'], 0), aid: _bytes(value['aid']),
       fci: _bytes(value['fci']), data: _bytes(value['data']));
   }
@@ -46,7 +49,9 @@ class CpuFileNode {
     'parent': parent == 255 ? null : parent, 'type': ['df','binary','records'][type],
     'fid': fid.toRadixString(16).padLeft(4, '0').toUpperCase(),
     if (sfi != 0) 'sfi': sfi,
-    if (type != 0) 'access': [if (access & 1 != 0) 'read', if (access & 2 != 0) 'write'],
+    if (type != 0) 'access': [if (access & 1 != 0) 'read', if (access & 2 != 0) 'write',
+      if (access & 4 != 0) 'read-pin', if (access & 8 != 0) 'write-pin',
+      if (access & 16 != 0) 'read-key', if (access & 32 != 0) 'write-key'],
     if (aid.isNotEmpty) 'aid': _hex(aid), if (fci.isNotEmpty) 'fci': _hex(fci),
     if (type != 0) 'data': _hex(data), if (type == 2) 'recordLength': recordLength,
   };
@@ -54,31 +59,44 @@ class CpuFileNode {
 
 class CpuFileSystem {
   final List<CpuFileNode> nodes;
-  CpuFileSystem(List<CpuFileNode> nodes) : nodes = List.unmodifiable(nodes);
+  final CpuSecurity? security;
+  CpuFileSystem(List<CpuFileNode> nodes, {this.security}) : nodes = List.unmodifiable(nodes);
 
   factory CpuFileSystem.fromJson(Map<String, dynamic> value) {
+    if (value['security'] != null && value['security'] is! Map<String,dynamic>) {
+      throw const FormatException('Invalid security object');
+    }
     final items = value['nodes'];
     if (items is! List || items.isEmpty || items.length > 16 || items.any((v) => v is! Map<String, dynamic>)) {
       throw const FormatException('filesystem.nodes 需要文件节点数组');
     }
-    final fs = CpuFileSystem([for (final item in items) CpuFileNode.fromJson(item as Map<String,dynamic>)]);
+    final fs = CpuFileSystem([for (final item in items) CpuFileNode.fromJson(item as Map<String,dynamic>)],
+      security: value['security'] == null ? null : CpuSecurity.fromJson(Map<String,dynamic>.from(value['security'] as Map)));
     fs.encode();
     return fs;
   }
-  Map<String,dynamic> toJson() => {'nodes': [for (final node in nodes) node.toJson()]};
+  Map<String,dynamic> toJson() => {'nodes': [for (final node in nodes) node.toJson()],
+    if (security != null) 'security': security!.toJson()};
 
   Uint8List encode() {
     if (nodes.isEmpty || nodes.length > 16) throw const FormatException('文件系统需要 1–16 个节点');
-    final bytes = <int>[..._magic, 1, nodes.length, 0, 0];
+    final bytes = <int>[..._magic, security == null ? 1 : 2, nodes.length, 0, 0];
     void u16(int n) { bytes.add(n >> 8); bytes.add(n & 255); }
     final aids = <String>{};
     for (var i = 0; i < nodes.length; i++) {
       final n = nodes[i];
       if (n.type < 0 || n.type > 2 || n.fid <= 0 || n.fid > 65535 || n.fid == 0x3FFF ||
-          n.sfi < 0 || n.sfi > 30 || n.access < 0 || n.access > 3 ||
+          n.sfi < 0 || n.sfi > 30 || n.access < 0 || n.access > (security == null ? 3 : 63) ||
           n.aid.length > 16 || (n.aid.isNotEmpty && n.aid.length < 5) || n.fci.length > 240 ||
           n.data.length > cpuFilesystemCapacity || n.recordLength < 0 || n.recordLength > 253) {
         throw const FormatException('文件类型、FID、SFI、访问权限或长度超出范围');
+      }
+      final a = n.access;
+      if ((a & 20 != 0 && a & 1 == 0) || (a & 40 != 0 && a & 2 == 0) ||
+          (a & 4 != 0 && a & 16 != 0) || (a & 8 != 0 && a & 32 != 0) ||
+          (a & 12 != 0 && (security == null || security!.pin.isEmpty)) ||
+          (a & 48 != 0 && (security == null || security!.key.isEmpty))) {
+        throw const FormatException('Protected files require the corresponding configured PIN/key');
       }
       if (i == 0) {
         if (n.parent != 255 || n.fid != 0x3F00 || n.type != 0 || n.aid.isNotEmpty) {
@@ -106,6 +124,7 @@ class CpuFileSystem {
       u16(n.fci.length); u16(n.data.length); u16(n.recordLength);
       bytes.addAll([...n.aid,...n.fci,...n.data]);
     }
+    if (security != null) bytes.addAll(security!.encode());
     if (bytes.length > cpuFilesystemCapacity) throw const FormatException('文件系统总容量上限为 3252 字节（含文件头）');
     bytes[6] = bytes.length >> 8; bytes[7] = bytes.length & 255;
     return Uint8List.fromList(bytes);
@@ -114,7 +133,7 @@ class CpuFileSystem {
   factory CpuFileSystem.decode(Uint8List bytes) {
     if (bytes.length < 8 || bytes.length > cpuFilesystemCapacity ||
         !List.generate(4,(i)=>bytes[i] == _magic[i]).every((v)=>v) ||
-        bytes[4] != 1 || bytes[5] < 1 || bytes[5] > 16 ||
+        ![1,2].contains(bytes[4]) || bytes[5] < 1 || bytes[5] > 16 ||
         (bytes[6] << 8 | bytes[7]) != bytes.length) throw const FormatException('CFS1 镜像头无效');
     var offset = 8;
     int u16(int p) => bytes[p] << 8 | bytes[p + 1];
@@ -129,8 +148,13 @@ class CpuFileSystem {
       final data = bytes.sublist(offset,offset+dataLength); offset += dataLength;
       nodes.add(CpuFileNode(parent:bytes[p],type:bytes[p+1],fid:u16(p+2),sfi:bytes[p+4],access:bytes[p+5],recordLength:u16(p+11),aid:aid,fci:fci,data:data));
     }
+    CpuSecurity? security;
+    if (bytes[4] == 2) {
+      if (offset + 44 != bytes.length) throw const FormatException('Truncated CFS security trailer');
+      security = CpuSecurity.decode(Uint8List.fromList(bytes.sublist(offset))); offset += 44;
+    }
     if (offset != bytes.length) throw const FormatException('CFS1 镜像存在额外数据');
-    final fs = CpuFileSystem(nodes); fs.encode(); return fs;
+    final fs = CpuFileSystem(nodes, security: security); fs.encode(); return fs;
   }
 
   factory CpuFileSystem.example() => CpuFileSystem([
@@ -178,6 +202,14 @@ Future<Uint8List?> readCpuFilesystem(CpuFilesystemExchange exchange) async {
 
 Future<void> writeCpuFilesystem(Uint8List image, CpuFilesystemExchange exchange) async {
   CpuFileSystem.decode(image);
+  if (image[4] == 2) {
+    Uint8List capabilities;
+    try { capabilities = await exchange(Uint8List.fromList([7])); }
+    catch (_) { throw StateError('请先升级配套认证固件：当前设备不支持 CFS v2'); }
+    if (capabilities.length != 2 || capabilities[0] < 2 || capabilities[1] & 3 != 3) {
+      throw StateError('请先升级配套认证固件：当前设备不支持 PIN/DES 认证');
+    }
+  }
   final (_, capacity, _) = await _filesystemInfo(exchange);
   if (image.length > capacity) throw const FormatException('文件镜像超过设备容量');
   try {

@@ -1,5 +1,4 @@
-import 'package:chameleonultragui/helpers/iso7816_fs.dart';
-import 'package:chameleonultragui/gui/menu/tools/cpu_filesystem.dart';
+import 'package:chameleonultragui/gui/menu/dialogs/card/cpu_dump.dart';
 import 'dart:typed_data';
 
 import 'package:chameleonultragui/bridge/chameleon.dart';
@@ -9,7 +8,6 @@ import 'package:chameleonultragui/helpers/definitions.dart';
 import 'package:chameleonultragui/helpers/cpu_emv.dart';
 import 'package:chameleonultragui/gui/menu/tools/cpu_emv_summary.dart';
 import 'package:chameleonultragui/helpers/general.dart';
-import 'package:chameleonultragui/helpers/hf14a4_slot.dart';
 import 'package:chameleonultragui/helpers/iso14443_4.dart';
 import 'package:chameleonultragui/main.dart';
 import 'package:flutter/material.dart';
@@ -18,29 +16,24 @@ import 'package:provider/provider.dart';
 
 class CpuCardMenu extends StatefulWidget {
   final bool readOnly, embedded, enabled;
-  final int initialTab;
   final ValueChanged<bool>? onBusyChanged;
   const CpuCardMenu({super.key, this.readOnly = false, this.embedded = false,
-    this.enabled = true, this.initialTab = 0, this.onBusyChanged});
+    this.enabled = true, this.onBusyChanged});
   @override
   State<CpuCardMenu> createState() => _CpuCardMenuState();
 }
 
 class _CpuCardMenuState extends State<CpuCardMenu> {
   final _commands = TextEditingController();
-  final _profile = TextEditingController();
   CardData? _identity;
   final _capture = <CpuApduPair>[];
   bool _busy = false, _session = false, _follow = true, _messageIsError = false;
   CpuEmvSummary? _summary;
   String _log = '', _message = '';
-  int _slot = 0;
-  String? _stored;
 
   @override
   void dispose() {
     _commands.dispose();
-    _profile.dispose();
     super.dispose();
   }
 
@@ -168,6 +161,11 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
         rethrow;
       }
       final pair = CpuApduPair(command, response);
+      if (command[1] == 0x20 || command[1] == 0x82) {
+        _append('Authentication APDU [redacted], SW ${pair.statusWord.toRadixString(16)}');
+        if (pair.statusWord != 0x9000) break;
+        continue;
+      }
       _capture.add(pair);
       _append(
         '> ${bytesToHexSpace(command)}\n< ${bytesToHexSpace(response)}\nSW ${pair.statusWord.toRadixString(16).padLeft(4, '0').toUpperCase()} · ${cpuStatusText(l, pair.statusWord)}',
@@ -175,22 +173,6 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
       if (pair.statusWord != 0x9000)
         break; // Stop scripts on the first card error.
     }
-  }
-
-  void _captureProfile() {
-    final identity = _identity;
-    if (identity == null) throw StateError('Select a card or scan EMV first');
-    final pairs = [
-      for (final pair in _capture)
-        CpuApduPair(
-          Uint8List.fromList(pair.command.take(16).toList()),
-          pair.response,
-        ),
-    ];
-    validateCpuRules(pairs);
-    _profile.text = cpuProfileJson(
-      identity, pairs, name: _summary?.applicationLabel ?? 'CPU card',
-    );
   }
 
   Future<void> _scan() async {
@@ -218,70 +200,14 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
     }
   }
 
-  Future<void> _upload() async {
-    final card = cpuProfileFromJson(
-      _profile.text,
-    ); // Validate before touching a slot.
-    final device = _device();
-    await _requireFirmware(device);
-    if (cpuFilesystemFromData(card.data) != null &&
-        !(await device.getDeviceCapabilities()).contains(ChameleonCommand.hf14a4Filesystem.value)) {
-      throw StateError('请先升级配套固件：当前设备缺少 CPU 文件系统命令 6009');
-    }
-    await device.setReaderDeviceMode(false);
-    if (mounted) setState(() => _session = false);
-    await device.enableSlot(_slot, TagFrequency.hf, false);
-    await device.activateSlot(_slot);
-    await prepareHf14a4Slot(device, _slot);
-    await writeHf14a4SlotIdentity(device, card);
-    await device.setSlotTagName(_slot, card.name, TagFrequency.hf);
-    await device.enableSlot(_slot, TagFrequency.hf, true);
-    await device.saveSlotData();
-    if (mounted) {
-      context.read<ChameleonGUIState>().changesMade();
-      setState(() => _message = AppLocalizations.of(context)!.cpu_done);
-    }
-  }
-
-  Future<void> _readSlot() async {
-    final device = _device();
-    await _requireFirmware(device);
-    await device.setReaderDeviceMode(false);
-    if (mounted) setState(() => _session = false);
-    await device.activateSlot(_slot);
-    final card = await readHf14a4SlotIdentity(device, 'CPU slot ${_slot + 1}');
-    _profile.text = cpuSavedProfileJson(card);
-  }
-
-  void _newFilesystem() {
-    final l = AppLocalizations.of(context)!;
-    final identity = _identity ?? CardData(uid: Uint8List.fromList([4,1,2,3,4,5,6]),
-      atqa: Uint8List.fromList([4,0]), sak: 0x20, ats: Uint8List.fromList([2,8]));
-    _profile.text = cpuProfileJson(identity, [], name: l.cpu_files_untitled,
-      filesystem: CpuFileSystem([CpuFileNode(parent:255,type:0,fid:0x3F00)]));
-    setState(() { _stored = null; _message = l.cpu_files_new_help; });
-  }
-
-  void _changeFilesystem(CpuFileSystem filesystem) {
-    final card = cpuProfileFromJson(_profile.text);
-    _profile.text = cpuProfileJson(CardData(uid:hexToBytes(card.uid), atqa:card.atqa,
-      sak:card.sak, ats:card.ats), [], name:card.name, filesystem:filesystem);
-    setState(() {});
-  }
-
-  Future<void> _persistSlot() async {
-    final device = _device();
-    await device.setReaderDeviceMode(false);
-    await device.activateSlot(_slot);
-    await device.saveSlotData();
-    if (mounted) setState(() { _session = false; _message = AppLocalizations.of(context)!.cpu_done; });
-  }
-
-  void _save() {
-    final card = cpuProfileFromJson(_profile.text);
+  Future<void> _saveReadCard() async {
+    final identity = _identity;
+    if (identity == null) return;
+    final card = await showCpuDumpDialog(context, identity,
+      name: _summary?.applicationLabel ?? '', capture: List.of(_capture));
+    if (card == null || !mounted) return;
     final app = context.read<ChameleonGUIState>();
-    final cards = app.sharedPreferencesProvider.getCards();
-    cards.add(card);
+    final cards = app.sharedPreferencesProvider.getCards()..add(card);
     app.sharedPreferencesProvider.setCards(cards);
     app.changesMade();
     setState(() => _message = AppLocalizations.of(context)!.cpu_done);
@@ -313,6 +239,9 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
         const SizedBox(height: 12),
       ],
       CpuIdentityPanel(identity: _identity),
+      if (_identity != null) OutlinedButton.icon(
+        onPressed: _busy ? null : () => _run(_saveReadCard),
+        icon: const Icon(Icons.save_outlined), label: Text(l.cpu_dump_save)),
       const SizedBox(height: 16),
       FilledButton.icon(
         onPressed: _busy || !online ? null : () => _run(_scan),
@@ -338,108 +267,6 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
       Text(l.cpu_advanced_help, style: Theme.of(context).textTheme.bodySmall),
     ],
   );
-
-  Widget _simulationTab(AppLocalizations l, bool online) {
-    final app = context.watch<ChameleonGUIState>();
-    final cards = app.sharedPreferencesProvider.getCards()
-        .where((card) => card.tag == TagType.hf14a4).toList();
-    var profileTitle = l.cpu_no_profile;
-    var validProfile = false;
-    var count = 0;
-    CpuFileSystem? filesystem;
-    try {
-      final profile = cpuProfileFromJson(_profile.text);
-      profileTitle = profile.name;
-      final image = cpuFilesystemFromData(profile.data);
-      filesystem = image == null ? null : CpuFileSystem.decode(image);
-      count = image == null ? profile.data.length ~/ 2 : filesystem!.nodes.length;
-      validProfile = true;
-    } catch (_) {
-      if (_profile.text.trim().isNotEmpty) profileTitle = l.cpu_profile_invalid;
-    }
-    return ListView(
-      key: const PageStorageKey('cpu-simulation-scroll'),
-      padding: const EdgeInsets.all(16),
-      children: [
-        Text(l.cpu_emulation_title, style: Theme.of(context).textTheme.titleLarge),
-        const SizedBox(height: 8),
-        Text(l.cpu_emulation_help),
-        const SizedBox(height: 12),
-        OutlinedButton.icon(onPressed: _busy ? null : () => _run(() async => _newFilesystem()),
-          icon: const Icon(Icons.create_new_folder_outlined), label: Text(l.cpu_files_new)),
-        const SizedBox(height: 20),
-        OutlinedButton.icon(
-          onPressed: _busy || _identity == null || _capture.isEmpty ? null : () => _run(() async {
-            _captureProfile();
-            setState(() => _message = l.cpu_done);
-          }),
-          icon: const Icon(Icons.move_to_inbox_outlined),
-          label: Text(l.cpu_capture),
-        ),
-        if (cards.isNotEmpty) ...[
-          const SizedBox(height: 12),
-          DropdownButtonFormField<String>(
-            isExpanded: true,
-            value: _stored,
-            decoration: InputDecoration(labelText: l.cpu_load_saved),
-            items: [for (final card in cards)
-              DropdownMenuItem(value: card.id, child: Text(card.name))],
-            onChanged: _busy ? null : (id) => _run(() async {
-              if (id == null) return;
-              final card = cards.firstWhere((card) => card.id == id);
-              _profile.text = cpuSavedProfileJson(card);
-              setState(() => _stored = id);
-            }),
-          ),
-        ],
-        const SizedBox(height: 16),
-        Card(
-          margin: EdgeInsets.zero,
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(profileTitle, style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 6),
-              Text(validProfile ? (filesystem == null ? '${l.cpu_rule_count}: $count' : l.cpu_files_mode) : l.cpu_profile_start),
-            ]),
-          ),
-        ),
-        if (filesystem != null) ...[
-          const SizedBox(height: 16),
-          CpuFilesystemEditor(filesystem: filesystem,
-            onChanged: _busy ? null : _changeFilesystem),
-        ],
-        const SizedBox(height: 16),
-        DropdownButtonFormField<int>(
-          value: _slot,
-          decoration: InputDecoration(labelText: l.cpu_slot),
-          items: [for (var i = 0; i < 8; i++)
-            DropdownMenuItem(value: i, child: Text('${i + 1}'))],
-          onChanged: _busy ? null : (value) => setState(() => _slot = value!),
-        ),
-        const SizedBox(height: 12),
-        FilledButton.icon(
-          onPressed: _busy || !online || !validProfile ? null : () => _run(_upload),
-          icon: const Icon(Icons.upload_outlined),
-          label: Text(l.cpu_upload),
-        ),
-        Wrap(spacing: 8, children: [
-          TextButton(
-            onPressed: _busy || !validProfile ? null : () => _run(() async => _save()),
-            child: Text(l.cpu_save),
-          ),
-          TextButton(
-            onPressed: _busy || !online ? null : () => _run(_readSlot),
-            child: Text(l.cpu_read_slot),
-          ),
-          TextButton(onPressed: _busy || !online ? null : () => _run(_persistSlot),
-            child: Text(l.cpu_files_persist)),
-        ]),
-        const SizedBox(height: 8),
-        Text(l.cpu_profile_edit_hint, style: Theme.of(context).textTheme.bodySmall),
-      ],
-    );
-  }
 
   Widget _advancedTab(AppLocalizations l, bool online) => ListView(
     key: const PageStorageKey('cpu-advanced-scroll'),
@@ -511,26 +338,6 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
           ]),
         ],
       ),
-      ExpansionTile(
-        key: const PageStorageKey('cpu-profile-expanded'),
-        tilePadding: EdgeInsets.zero,
-        title: Text(l.cpu_profile_json),
-        children: [
-          Text(l.cpu_profile_help),
-          const SizedBox(height: 12),
-          TextField(
-            key: const PageStorageKey('cpu-profile-editor-scroll'),
-            controller: _profile, enabled: !_busy, minLines: 6, maxLines: 16,
-            onChanged: (_) => setState(() {}),
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-            decoration: const InputDecoration(labelText: 'JSON', border: OutlineInputBorder()),
-          ),
-          TextButton(
-            onPressed: _profile.text.trim().isEmpty ? null : () => Clipboard.setData(ClipboardData(text: _profile.text)),
-            child: Text(l.cpu_copy_json),
-          ),
-        ],
-      ),
     ],
   );
 
@@ -549,57 +356,18 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
         _readerTab(l, online),
       ]));
     }
-    final colors = Theme.of(context).colorScheme;
-    return PopScope(
-      canPop: !_busy && !_session,
-      onPopInvokedWithResult: (didPop, result) {
-        if (!didPop && !_busy) _exit();
-      },
-      child: Dialog.fullscreen(
-        child: DefaultTabController(
-          length: 2,
-          initialIndex: widget.initialTab,
-          child: Scaffold(
-            appBar: AppBar(
-              leading: IconButton(
-                onPressed: _busy ? null : _exit,
-                icon: const Icon(Icons.close), tooltip: l.cpu_close,
-              ),
-              title: Text(l.cpu_title),
-              actions: [if (_busy) const Padding(
-                padding: EdgeInsets.all(16),
-                child: SizedBox(width: 20, height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2))),
-              ],
-              bottom: TabBar(tabs: [
-                Tab(text: l.cpu_tab_emulate),
-                Tab(text: l.cpu_tab_advanced),
-              ]),
-            ),
-            body: SafeArea(
-              top: false,
-              child: Column(children: [
-                if (_message.isNotEmpty) Container(
-                  width: double.infinity,
-                  color: _messageIsError ? colors.errorContainer : colors.secondaryContainer,
-                  padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
-                  child: Row(children: [
-                    Icon(_messageIsError ? Icons.error_outline : Icons.info_outline),
-                    const SizedBox(width: 10),
-                    Expanded(child: SelectionArea(child: Text(_message))),
-                    IconButton(onPressed: () => setState(() => _message = ''),
-                      icon: const Icon(Icons.close), tooltip: l.cpu_close),
-                  ]),
-                ),
-                Expanded(child: TabBarView(children: [
-                  _simulationTab(l, online),
-                  _advancedTab(l, online),
-                ])),
-              ]),
-            ),
-          ),
-        ),
-      ),
+    return PopScope(canPop: !_busy && !_session,
+      onPopInvokedWithResult: (didPop, result) { if (!didPop && !_busy) _exit(); },
+      child: Dialog.fullscreen(child: Scaffold(
+        appBar: AppBar(title: Text(l.cpu_apdu_tools),
+          leading: IconButton(onPressed: _busy ? null : _exit,
+            icon: const Icon(Icons.close), tooltip: l.cpu_close)),
+        body: Column(children: [
+          if (_busy) const LinearProgressIndicator(),
+          if (_message.isNotEmpty) Padding(padding: const EdgeInsets.all(12), child: Text(_message)),
+          Expanded(child: _advancedTab(l, online)),
+        ]),
+      )),
     );
   }
 }

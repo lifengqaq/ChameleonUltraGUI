@@ -1,3 +1,4 @@
+import 'package:chameleonultragui/gui/menu/dialogs/card/cpu_dump.dart';
 import 'package:chameleonultragui/gui/menu/tools/cpu_card.dart';
 import 'package:chameleonultragui/gui/component/card_button.dart';
 import 'package:chameleonultragui/gui/component/mifare/classic.dart';
@@ -257,6 +258,23 @@ class ReadCardPageState extends State<ReadCardPage> {
     var appState = Provider.of<ChameleonGUIState>(context, listen: false);
     var localizations = AppLocalizations.of(context)!;
 
+    final sak = hexToBytes(hfInfo.sak);
+    if (hfInfo.type == TagType.hf14a4 || (sak.isNotEmpty && sak.first & 0x20 != 0)) {
+      stopContinuousHFScan();
+      stopContinuousLFScan();
+      setState(() => _cpuBusy = true);
+      try {
+        final card = await showCpuDumpDialog(context, CardData(uid: hexToBytes(hfInfo.uid),
+          sak: sak.first, atqa: hexToBytes(hfInfo.atqa),
+          ats: hfInfo.ats != localizations.no ? hexToBytes(hfInfo.ats) : Uint8List(0)), name: dumpName);
+        if (card != null) {
+          final cards = appState.sharedPreferencesProvider.getCards()..add(card);
+          appState.sharedPreferencesProvider.setCards(cards);
+          appState.changesMade();
+        }
+      } finally { if (mounted) setState(() => _cpuBusy = false); }
+      return;
+    }
     var tags = appState.sharedPreferencesProvider.getCards();
     tags.add(CardSave(
       uid: hfInfo.uid,
