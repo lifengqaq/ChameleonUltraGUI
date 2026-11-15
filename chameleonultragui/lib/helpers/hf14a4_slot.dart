@@ -1,3 +1,4 @@
+import 'package:chameleonultragui/helpers/iso7816_fs.dart';
 import 'dart:typed_data';
 
 import 'package:chameleonultragui/helpers/iso14443_4.dart';
@@ -10,13 +11,15 @@ Future<void> writeHf14a4SlotIdentity(
   ChameleonCommunicator communicator,
   CardSave card,
 ) async {
-  final pairs = card.tag == TagType.hf14a4
-      ? cpuRulesFromData(card.data)
-      : <CpuApduPair>[];
-  final supported = card.tag == TagType.hf14a4 &&
-      (await communicator.getDeviceCapabilities()).contains(
-    ChameleonCommand.hf14a4StaticRead.value,
-  );
+  final image = card.tag == TagType.hf14a4 ? cpuFilesystemFromData(card.data) : null;
+  final pairs = card.tag == TagType.hf14a4 && image == null
+      ? cpuRulesFromData(card.data) : <CpuApduPair>[];
+  final commands = card.tag == TagType.hf14a4
+      ? await communicator.getDeviceCapabilities() : <int>[];
+  final supported = commands.contains(ChameleonCommand.hf14a4StaticRead.value);
+  if (image != null && !commands.contains(ChameleonCommand.hf14a4Filesystem.value)) {
+    throw StateError('请先升级配套固件：当前设备缺少 CPU 文件系统命令 6009');
+  }
   if (pairs.isNotEmpty && !supported) {
     throw StateError('APDU table upload requires updated ISO-DEP firmware');
   }
@@ -28,7 +31,9 @@ Future<void> writeHf14a4SlotIdentity(
       ats: card.ats,
     ),
   );
-  if (supported) {
+  if (image != null) {
+    await communicator.hf14a4WriteFilesystem(image);
+  } else if (supported) {
     await communicator.hf14a4ClearStaticResponses();
     for (final pair in pairs) {
       await communicator.hf14a4AddStaticResponse(pair.command, pair.response);
@@ -42,12 +47,11 @@ Future<CardSave> readHf14a4SlotIdentity(
 ) async {
   final data = await communicator.mf1GetAntiCollData();
 
-  final supported = (await communicator.getDeviceCapabilities()).contains(
-    ChameleonCommand.hf14a4StaticRead.value,
-  );
-  final pairs = supported
-      ? await communicator.hf14a4ReadStaticResponses()
-      : <CpuApduPair>[];
+  final commands = await communicator.getDeviceCapabilities();
+  final image = commands.contains(ChameleonCommand.hf14a4Filesystem.value)
+      ? await communicator.hf14a4ReadFilesystem() : null;
+  final pairs = image == null && commands.contains(ChameleonCommand.hf14a4StaticRead.value)
+      ? await communicator.hf14a4ReadStaticResponses() : <CpuApduPair>[];
   return CardSave(
     uid: bytesToHexSpace(data.uid),
     name: name,
@@ -56,6 +60,7 @@ Future<CardSave> readHf14a4SlotIdentity(
     ats: data.ats,
     tag: TagType.hf14a4,
     data: <Uint8List>[
+      if (image != null) image,
       for (final pair in pairs) ...[pair.command, pair.response],
     ],
   );

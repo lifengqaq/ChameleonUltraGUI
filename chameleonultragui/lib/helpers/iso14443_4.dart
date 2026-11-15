@@ -1,3 +1,4 @@
+import 'package:chameleonultragui/helpers/iso7816_fs.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -179,16 +180,20 @@ String cpuProfileJson(
   CardData identity,
   List<CpuApduPair> pairs, {
   String name = 'CPU card',
+  CpuFileSystem? filesystem,
 }) {
+  if (filesystem != null) filesystem.encode();
+  if (filesystem != null && pairs.isNotEmpty) throw const FormatException('文件系统与静态响应表需选择一种模拟模式');
   return const JsonEncoder.withIndent('  ').convert({
     'format': 'chameleon-iso14443-4',
-    'version': 1,
+    'version': filesystem == null ? 1 : 2,
     'name': name,
     'uid': bytesToHex(identity.uid),
     'atqa': bytesToHex(identity.atqa),
     'sak': identity.sak.toRadixString(16).padLeft(2, '0'),
     'ats': bytesToHex(identity.ats),
-    'responses': [
+    if (filesystem != null) 'filesystem': filesystem.toJson(),
+    if (filesystem == null) 'responses': [
       for (final pair in pairs)
         {
           'command': bytesToHex(pair.command),
@@ -200,7 +205,7 @@ String cpuProfileJson(
 
 CardSave cpuProfileFromJson(String source) {
   final data = jsonDecode(source) as Map<String, dynamic>;
-  if (data['format'] != 'chameleon-iso14443-4' || data['version'] != 1) {
+  if (data['format'] != 'chameleon-iso14443-4' || ![1, 2].contains(data['version'])) {
     throw const FormatException('Unsupported CPU card profile');
   }
   final uid = cpuHex(data['uid'] as String, min: 4, max: 10);
@@ -210,8 +215,16 @@ CardSave cpuProfileFromJson(String source) {
   parseCpuIdentity(
     Uint8List.fromList([uid.length, ...uid, ...atqa, sak, ats.length, ...ats]),
   );
+  final fsValue = data['filesystem'];
+  if ((data['version'] == 2) != (fsValue is Map<String, dynamic>) ||
+      (fsValue != null && data['responses'] != null)) {
+    throw const FormatException('文件系统配置使用 version 2，且与 responses 互斥');
+  }
+  final filesystem = fsValue == null ? null : CpuFileSystem.fromJson(fsValue as Map<String, dynamic>);
+  final rawResponses = data['responses'] ?? <dynamic>[];
+  if (rawResponses is! List) throw const FormatException('responses 需要数组');
   final pairs = [
-    for (final item in data['responses'] as List)
+    for (final item in rawResponses)
       CpuApduPair(
         cpuHex(item['command'] as String, min: 1, max: 16),
         cpuHex(item['response'] as String, min: 2, max: 260),
@@ -226,7 +239,16 @@ CardSave cpuProfileFromJson(String source) {
     sak: sak,
     ats: ats,
     data: [
+      if (filesystem != null) filesystem.encode(),
       for (final pair in pairs) ...[pair.command, pair.response],
     ],
   );
+}
+
+
+String cpuSavedProfileJson(CardSave card) {
+  final image = cpuFilesystemFromData(card.data);
+  return cpuProfileJson(CardData(uid: hexToBytes(card.uid), atqa: card.atqa,
+    sak: card.sak, ats: card.ats), image == null ? cpuRulesFromData(card.data) : [],
+    name: card.name, filesystem: image == null ? null : CpuFileSystem.decode(image));
 }

@@ -1,3 +1,4 @@
+import 'package:chameleonultragui/helpers/iso7816_fs.dart';
 import 'dart:typed_data';
 
 import 'package:chameleonultragui/gui/component/card_list.dart';
@@ -152,7 +153,13 @@ class SlotManagerPageState extends State<SlotManagerPage> {
       appState.changesMade();
       refreshSlot();
     } else if (card.tag == TagType.hf14a4) {
-      cpuRulesFromData(card.data);
+      final image = cpuFilesystemFromData(card.data);
+      if (image == null) {
+        cpuRulesFromData(card.data);
+      } else if (!(await appState.communicator!.getDeviceCapabilities())
+          .contains(ChameleonCommand.hf14a4Filesystem.value)) {
+        throw StateError('请先升级配套固件：当前设备缺少 CPU 文件系统命令 6009');
+      }
       close(context, card.name);
       setUploadState(0);
       await appState.communicator!.setReaderDeviceMode(false);

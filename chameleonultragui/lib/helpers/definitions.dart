@@ -101,6 +101,7 @@ enum ChameleonCommand {
   hf14a4EmvScan(6005),
   hf14a4Session(6007),
   hf14a4StaticRead(6008),
+  hf14a4Filesystem(6009),
 
   // lf commands
   scanEM410Xtag(3000),

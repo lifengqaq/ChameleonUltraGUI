@@ -1,3 +1,5 @@
+import 'package:chameleonultragui/helpers/iso7816_fs.dart';
+import 'package:chameleonultragui/gui/menu/tools/cpu_filesystem.dart';
 import 'dart:typed_data';
 
 import 'package:chameleonultragui/bridge/chameleon.dart';
@@ -212,6 +214,10 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
     ); // Validate before touching a slot.
     final device = _device();
     await _requireFirmware(device);
+    if (cpuFilesystemFromData(card.data) != null &&
+        !(await device.getDeviceCapabilities()).contains(ChameleonCommand.hf14a4Filesystem.value)) {
+      throw StateError('请先升级配套固件：当前设备缺少 CPU 文件系统命令 6009');
+    }
     await device.setReaderDeviceMode(false);
     if (mounted) setState(() => _session = false);
     await device.enableSlot(_slot, TagFrequency.hf, false);
@@ -235,16 +241,31 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
     if (mounted) setState(() => _session = false);
     await device.activateSlot(_slot);
     final card = await readHf14a4SlotIdentity(device, 'CPU slot ${_slot + 1}');
-    _profile.text = cpuProfileJson(
-      CardData(
-        uid: hexToBytes(card.uid),
-        atqa: card.atqa,
-        sak: card.sak,
-        ats: card.ats,
-      ),
-      cpuRulesFromData(card.data),
-      name: card.name,
-    );
+    _profile.text = cpuSavedProfileJson(card);
+  }
+
+  void _newFilesystem() {
+    final l = AppLocalizations.of(context)!;
+    final identity = _identity ?? CardData(uid: Uint8List.fromList([4,1,2,3,4,5,6]),
+      atqa: Uint8List.fromList([4,0]), sak: 0x20, ats: Uint8List.fromList([2,8]));
+    _profile.text = cpuProfileJson(identity, [], name: l.cpu_files_untitled,
+      filesystem: CpuFileSystem([CpuFileNode(parent:255,type:0,fid:0x3F00)]));
+    setState(() { _stored = null; _message = l.cpu_files_new_help; });
+  }
+
+  void _changeFilesystem(CpuFileSystem filesystem) {
+    final card = cpuProfileFromJson(_profile.text);
+    _profile.text = cpuProfileJson(CardData(uid:hexToBytes(card.uid), atqa:card.atqa,
+      sak:card.sak, ats:card.ats), [], name:card.name, filesystem:filesystem);
+    setState(() {});
+  }
+
+  Future<void> _persistSlot() async {
+    final device = _device();
+    await device.setReaderDeviceMode(false);
+    await device.activateSlot(_slot);
+    await device.saveSlotData();
+    if (mounted) setState(() { _session = false; _message = AppLocalizations.of(context)!.cpu_done; });
   }
 
   void _save() {
@@ -352,10 +373,13 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
     var profileTitle = l.cpu_no_profile;
     var validProfile = false;
     var count = 0;
+    CpuFileSystem? filesystem;
     try {
       final profile = cpuProfileFromJson(_profile.text);
       profileTitle = profile.name;
-      count = profile.data.length ~/ 2;
+      final image = cpuFilesystemFromData(profile.data);
+      filesystem = image == null ? null : CpuFileSystem.decode(image);
+      count = image == null ? profile.data.length ~/ 2 : filesystem!.nodes.length;
       validProfile = true;
     } catch (_) {
       if (_profile.text.trim().isNotEmpty) profileTitle = l.cpu_profile_invalid;
@@ -364,9 +388,12 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
       key: const PageStorageKey('cpu-simulation'),
       padding: const EdgeInsets.all(16),
       children: [
-        Text(l.cpu_static_title, style: Theme.of(context).textTheme.titleLarge),
+        Text(l.cpu_emulation_title, style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 8),
-        Text(l.cpu_static_help),
+        Text(l.cpu_emulation_help),
+        const SizedBox(height: 12),
+        OutlinedButton.icon(onPressed: _busy ? null : () => _run(() async => _newFilesystem()),
+          icon: const Icon(Icons.create_new_folder_outlined), label: Text(l.cpu_files_new)),
         const SizedBox(height: 20),
         OutlinedButton.icon(
           onPressed: _busy || _identity == null || _capture.isEmpty ? null : () => _run(() async {
@@ -387,11 +414,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
             onChanged: _busy ? null : (id) => _run(() async {
               if (id == null) return;
               final card = cards.firstWhere((card) => card.id == id);
-              _profile.text = cpuProfileJson(
-                CardData(uid: hexToBytes(card.uid), atqa: card.atqa,
-                  sak: card.sak, ats: card.ats),
-                cpuRulesFromData(card.data), name: card.name,
-              );
+              _profile.text = cpuSavedProfileJson(card);
               setState(() => _stored = id);
             }),
           ),
@@ -404,10 +427,15 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(profileTitle, style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 6),
-              Text(validProfile ? '${l.cpu_rule_count}: $count' : l.cpu_profile_start),
+              Text(validProfile ? (filesystem == null ? '${l.cpu_rule_count}: $count' : l.cpu_files_mode) : l.cpu_profile_start),
             ]),
           ),
         ),
+        if (filesystem != null) ...[
+          const SizedBox(height: 16),
+          CpuFilesystemEditor(filesystem: filesystem,
+            onChanged: _busy ? null : _changeFilesystem),
+        ],
         const SizedBox(height: 16),
         DropdownButtonFormField<int>(
           value: _slot,
@@ -431,6 +459,8 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
             onPressed: _busy || !online ? null : () => _run(_readSlot),
             child: Text(l.cpu_read_slot),
           ),
+          TextButton(onPressed: _busy || !online ? null : () => _run(_persistSlot),
+            child: Text(l.cpu_files_persist)),
         ]),
         const SizedBox(height: 8),
         Text(l.cpu_profile_edit_hint, style: Theme.of(context).textTheme.bodySmall),

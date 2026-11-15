@@ -1,3 +1,4 @@
+import 'package:chameleonultragui/helpers/iso7816_fs.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:async';
@@ -1582,6 +1583,12 @@ class ChameleonCommunicator {
     validateCpuRules(result);
     return result;
   }
+
+  Future<Uint8List?> hf14a4ReadFilesystem() => readCpuFilesystem((data) =>
+      _cpuCommand(ChameleonCommand.hf14a4Filesystem, data: data));
+
+  Future<void> hf14a4WriteFilesystem(Uint8List image) => writeCpuFilesystem(image,
+      (data) => _cpuCommand(ChameleonCommand.hf14a4Filesystem, data: data));
 
   Future<CardData> hf14a4OpenSession() async {
     final bytes = await _cpuCommand(ChameleonCommand.hf14a4Session,
