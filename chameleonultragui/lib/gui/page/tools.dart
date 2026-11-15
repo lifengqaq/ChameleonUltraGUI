@@ -1,4 +1,3 @@
-import 'package:chameleonultragui/gui/menu/tools/cpu_card.dart';
 import 'package:chameleonultragui/gui/menu/tools/t55xx_block_editor.dart';
 import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
 import 'package:chameleonultragui/gui/menu/tools/dictionary_download.dart';
@@ -105,18 +104,11 @@ class ToolsPageState extends State<ToolsPage> {
         isDeviceRequired: true,
       ),
       ToolItem(
-        name: localizations.cpu_title,
-        description: localizations.cpu_description,
-        icon: Icons.credit_card,
-        onPressed: const CpuCardMenu(),
-        isDeviceRequired: false,
-      ),
-      ToolItem(
-        name: localizations.raw_hf,
-        description: localizations.raw_hf_description,
+        name: localizations.cpu_hf_tools,
+        description: localizations.cpu_hf_tools_description,
         icon: Icons.nfc,
         onPressed: const RawCommandsMenu(hf: true),
-        isDeviceRequired: true,
+        isDeviceRequired: false,
       ),
       ToolItem(
         name: localizations.raw_device,
@@ -162,7 +154,7 @@ class ToolsPageState extends State<ToolsPage> {
                         return;
                       }
                       showDialog(
-                        barrierDismissible: tool.onPressed is! RawCommandsMenu && tool.onPressed is! CpuCardMenu,
+                        barrierDismissible: tool.onPressed is! RawCommandsMenu,
                         context: context,
                         builder: (BuildContext context) {
                           return tool.onPressed!;

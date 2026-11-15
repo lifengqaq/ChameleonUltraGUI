@@ -17,7 +17,11 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 class CpuCardMenu extends StatefulWidget {
-  const CpuCardMenu({super.key});
+  final bool readOnly, embedded, enabled;
+  final int initialTab;
+  final ValueChanged<bool>? onBusyChanged;
+  const CpuCardMenu({super.key, this.readOnly = false, this.embedded = false,
+    this.enabled = true, this.initialTab = 0, this.onBusyChanged});
   @override
   State<CpuCardMenu> createState() => _CpuCardMenuState();
 }
@@ -56,7 +60,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
     if (!commands.contains(ChameleonCommand.hf14a4Session.value) ||
         !commands.contains(ChameleonCommand.hf14a4StaticRead.value)) {
       throw StateError(
-        'Install firmware with ISO-DEP session/table support (6007/6008)',
+        AppLocalizations.of(context)!.cpu_error_firmware,
       );
     }
   }
@@ -64,6 +68,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
   Future<void> _run(Future<void> Function() operation) async {
     if (_busy) return;
     final l = AppLocalizations.of(context)!;
+    widget.onBusyChanged?.call(true);
     setState(() {
       _busy = true;
       _message = '';
@@ -84,6 +89,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
       }
     } finally {
       if (mounted) setState(() => _busy = false);
+      widget.onBusyChanged?.call(false);
     }
   }
 
@@ -125,6 +131,10 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
     _append(
       'UID ${bytesToHexSpace(identity.uid)}\nATS ${bytesToHexSpace(identity.ats)}',
     );
+    if (widget.readOnly) {
+      await device.hf14a4CloseSession();
+      if (mounted) setState(() => _session = false);
+    }
   }
 
   Future<void> _disconnect() async {
@@ -292,54 +302,18 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
     if (mounted) Navigator.of(context).pop();
   }
 
-  Widget _identityCard(AppLocalizations l) {
-    final identity = _identity;
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(children: [
-              const Icon(Icons.contactless_outlined),
-              const SizedBox(width: 10),
-              Expanded(child: Text(
-                identity == null ? l.cpu_place_card : l.cpu_card_identified,
-                style: Theme.of(context).textTheme.titleMedium,
-              )),
-            ]),
-            const SizedBox(height: 10),
-            if (identity == null)
-              Text(l.cpu_place_help)
-            else ...[
-              CpuInfoRow(label: 'UID', value: bytesToHexSpace(identity.uid)),
-              Text(l.cpu_type_a, style: Theme.of(context).textTheme.bodySmall),
-              ExpansionTile(
-                tilePadding: EdgeInsets.zero,
-                title: Text(l.cpu_radio_details),
-                children: [
-                  CpuInfoRow(label: 'ATQA', value: bytesToHexSpace(identity.atqa)),
-                  CpuInfoRow(label: 'SAK', value: identity.sak.toRadixString(16).padLeft(2, '0').toUpperCase()),
-                  CpuInfoRow(label: 'ATS', value: bytesToHexSpace(identity.ats)),
-                ],
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _readerTab(AppLocalizations l, bool online) => ListView(
     key: const PageStorageKey('cpu-reader'),
+    shrinkWrap: widget.embedded,
+    primary: false,
+    physics: widget.embedded ? const NeverScrollableScrollPhysics() : null,
     padding: const EdgeInsets.all(16),
     children: [
       if (!online) ...[
         Text(l.cpu_device_help),
         const SizedBox(height: 12),
       ],
-      _identityCard(l),
+      CpuIdentityPanel(identity: _identity),
       const SizedBox(height: 16),
       FilledButton.icon(
         onPressed: _busy || !online ? null : () => _run(_scan),
@@ -352,7 +326,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
         icon: const Icon(Icons.nfc),
         label: Text(l.cpu_identify_only),
       ),
-      TextButton(
+      if (!widget.readOnly) TextButton(
         onPressed: _busy || !_session ? null : () => _run(_disconnect),
         child: Text(l.cpu_disconnect),
       ),
@@ -561,7 +535,17 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
     final app = context.watch<ChameleonGUIState>();
-    final online = app.connector?.connected == true;
+    final online = app.connector?.connected == true && widget.enabled;
+    if (widget.readOnly) {
+      return Card(child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Padding(padding: const EdgeInsets.fromLTRB(16,16,16,0), child: Text(l.cpu_title,
+          style: Theme.of(context).textTheme.titleLarge)),
+        if (_busy) const LinearProgressIndicator(),
+        if (_message.isNotEmpty) Padding(padding: const EdgeInsets.all(16),
+          child: Text(_message, style: _messageIsError ? TextStyle(color:Theme.of(context).colorScheme.error) : null)),
+        _readerTab(l, online),
+      ]));
+    }
     final colors = Theme.of(context).colorScheme;
     return PopScope(
       canPop: !_busy && !_session,
@@ -570,7 +554,8 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
       },
       child: Dialog.fullscreen(
         child: DefaultTabController(
-          length: 3,
+          length: 2,
+          initialIndex: widget.initialTab,
           child: Scaffold(
             appBar: AppBar(
               leading: IconButton(
@@ -584,7 +569,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
                   child: CircularProgressIndicator(strokeWidth: 2))),
               ],
               bottom: TabBar(tabs: [
-                Tab(text: l.cpu_tab_read), Tab(text: l.cpu_tab_emulate),
+                Tab(text: l.cpu_tab_emulate),
                 Tab(text: l.cpu_tab_advanced),
               ]),
             ),
@@ -604,7 +589,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
                   ]),
                 ),
                 Expanded(child: TabBarView(children: [
-                  _readerTab(l, online), _simulationTab(l, online),
+                  _simulationTab(l, online),
                   _advancedTab(l, online),
                 ])),
               ]),

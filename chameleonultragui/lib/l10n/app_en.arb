@@ -894,5 +894,8 @@
   "cpu_files_mode": "Stateful file system",
   "cpu_files_new_help": "Created an empty MF 3F00. New profiles use a sample UID unless a card was selected. Edit identity in Advanced > Profile JSON; add files below. This is not a physical-card backup.",
   "cpu_files_untitled": "New CPU file system",
-  "cpu_files_persist": "Store slot contents"
+  "cpu_files_persist": "Store slot contents",
+  "cpu_hf_tools": "HF raw commands / CPU cards",
+  "cpu_hf_tools_description": "Raw RF frames, CPU file emulation and advanced APDUs",
+  "cpu_apdu_tools": "CPU APDU tools"
 }

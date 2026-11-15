@@ -1,3 +1,4 @@
+import 'package:chameleonultragui/gui/menu/tools/cpu_card.dart';
 import 'dart:typed_data';
 
 import 'package:chameleonultragui/connector/serial_abstract.dart';
@@ -136,6 +137,15 @@ class _RawCommandsMenuState extends State<RawCommandsMenu> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      if (widget.hf) ...[
+                        Wrap(spacing: 8, children: [for (var i = 0; i < 2; i++) OutlinedButton.icon(
+                          onPressed: _busy ? null : () => showDialog<void>(context: context,
+                            barrierDismissible: false, builder: (_) => CpuCardMenu(initialTab: i)),
+                          icon: const Icon(Icons.nfc),
+                          label: Text(i == 0 ? l.cpu_emulation_title : l.cpu_apdu_tools),
+                        )]),
+                        const Divider(height: 24),
+                      ],
                       if (!connected) Text(l.device_required),
                       if (widget.hf && connected && !hfSupported)
                         Text(l.raw_ultra_required),

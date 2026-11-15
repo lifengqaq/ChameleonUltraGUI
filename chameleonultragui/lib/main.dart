@@ -1,3 +1,4 @@
+import 'package:chameleonultragui/helpers/ui_diagnostics.dart';
 import 'dart:io';
 import 'package:chameleonultragui/bridge/chameleon.dart';
 import 'package:chameleonultragui/connector/serial_abstract.dart';
@@ -41,6 +42,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final sharedPreferencesProvider = SharedPreferencesProvider();
   await sharedPreferencesProvider.load();
+  installUiDiagnostics(sharedPreferencesProvider);
   runApp(ChameleonGUI(sharedPreferencesProvider));
 }
 

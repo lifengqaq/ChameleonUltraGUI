@@ -719,5 +719,8 @@
   "cpu_files_mode": "有状态文件系统",
   "cpu_files_new_help": "已新建空的 MF 3F00。若未选择实体卡，UID 使用示例值；可到“高级 → 配置 JSON”修改身份参数。请在下方添加文件，这份配置并非实体卡备份。",
   "cpu_files_untitled": "新建 CPU 文件系统",
-  "cpu_files_persist": "保存卡槽当前数据"
+  "cpu_files_persist": "保存卡槽当前数据",
+  "cpu_hf_tools": "高频原始指令 / CPU 卡",
+  "cpu_hf_tools_description": "原始射频指令、CPU 卡文件模拟与高级 APDU",
+  "cpu_apdu_tools": "CPU 卡 APDU 高级指令"
 }

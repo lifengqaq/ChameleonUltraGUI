@@ -1,3 +1,5 @@
+import 'package:chameleonultragui/helpers/definitions.dart';
+import 'package:chameleonultragui/helpers/general.dart';
 import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
 import 'package:chameleonultragui/helpers/cpu_emv.dart';
 import 'package:chameleonultragui/helpers/iso14443_4.dart';
@@ -147,6 +149,50 @@ class CpuEmvSummaryPanel extends StatelessWidget {
             if (summary.gpoReturnedData && !summary.hasAfl && !summary.hasMalformedData) ...[
               const SizedBox(height: 12),
               Text(l.cpu_no_afl, style: theme.textTheme.bodySmall),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+class CpuIdentityPanel extends StatelessWidget {
+  final CardData? identity;
+  const CpuIdentityPanel({super.key, this.identity});
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
+    final identity = this.identity;
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(children: [
+              const Icon(Icons.contactless_outlined),
+              const SizedBox(width: 10),
+              Expanded(child: Text(
+                identity == null ? l.cpu_place_card : l.cpu_card_identified,
+                style: Theme.of(context).textTheme.titleMedium,
+              )),
+            ]),
+            const SizedBox(height: 10),
+            if (identity == null)
+              Text(l.cpu_place_help)
+            else ...[
+              CpuInfoRow(label: 'UID', value: bytesToHexSpace(identity.uid)),
+              Text(l.cpu_type_a, style: Theme.of(context).textTheme.bodySmall),
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: Text(l.cpu_radio_details),
+                children: [
+                  CpuInfoRow(label: 'ATQA', value: bytesToHexSpace(identity.atqa)),
+                  CpuInfoRow(label: 'SAK', value: identity.sak.toRadixString(16).padLeft(2, '0').toUpperCase()),
+                  CpuInfoRow(label: 'ATS', value: bytesToHexSpace(identity.ats)),
+                ],
+              ),
             ],
           ],
         ),

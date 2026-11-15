@@ -1,3 +1,6 @@
+import 'package:chameleonultragui/gui/menu/tools/cpu_filesystem.dart';
+import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
+import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:chameleonultragui/helpers/definitions.dart';
@@ -121,4 +124,26 @@ void main() {
     device.image=CpuFileSystem.example().encode(); device.shortRead=true;
     await expectLater(readCpuFilesystem(device.exchange),throwsFormatException);
   });
+
+  testWidgets('file editor adds a binary file on a narrow screen', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(320,760));
+    addTearDown(()=>tester.binding.setSurfaceSize(null));
+    CpuFileSystem? result;
+    await tester.pumpWidget(MaterialApp(locale:const Locale('en'),
+      localizationsDelegates:AppLocalizations.localizationsDelegates,
+      supportedLocales:AppLocalizations.supportedLocales,
+      home:Scaffold(body:SingleChildScrollView(padding:const EdgeInsets.all(16),
+        child:CpuFilesystemEditor(filesystem:CpuFileSystem([CpuFileNode(parent:255,type:0,fid:0x3F00)]),
+          onChanged:(value)=>result=value)))));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add binary file'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byWidgetPredicate((w)=>w is TextField && w.decoration?.labelText == 'File contents (hex)'), '01020304');
+    await tester.tap(find.widgetWithText(FilledButton,'OK'));
+    await tester.pumpAndSettle();
+    expect(result?.nodes.length,2);
+    expect(result?.nodes.last.data,[1,2,3,4]);
+    expect(tester.takeException(),isNull);
+  });
+
 }

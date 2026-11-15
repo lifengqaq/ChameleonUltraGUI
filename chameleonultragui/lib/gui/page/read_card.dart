@@ -1,3 +1,4 @@
+import 'package:chameleonultragui/gui/menu/tools/cpu_card.dart';
 import 'package:chameleonultragui/gui/component/card_button.dart';
 import 'package:chameleonultragui/gui/component/mifare/classic.dart';
 import 'package:chameleonultragui/gui/component/error_message.dart';
@@ -98,6 +99,7 @@ class ReadCardPageState extends State<ReadCardPage> {
   bool isContinuousHFScan = false;
   bool isContinuousLFScan = false;
   bool scanInProgress = false;
+  bool _cpuBusy = false;
   Timer? hfScanTimer;
   Timer? lfScanTimer;
 
@@ -146,7 +148,7 @@ class ReadCardPageState extends State<ReadCardPage> {
   }
 
   Future<void> startContinuousHFScan() async {
-    if (isContinuousHFScan) return;
+    if (isContinuousHFScan || _cpuBusy) return;
 
     setState(() {
       isContinuousHFScan = true;
@@ -201,7 +203,7 @@ class ReadCardPageState extends State<ReadCardPage> {
   }
 
   Future<void> startContinuousLFScan() async {
-    if (isContinuousLFScan) return;
+    if (isContinuousLFScan || _cpuBusy) return;
 
     setState(() {
       isContinuousLFScan = true;
@@ -477,7 +479,7 @@ class ReadCardPageState extends State<ReadCardPage> {
                                 SizedBox(
                                   width: double.infinity,
                                   child: ElevatedButton(
-                                    onPressed: scanInProgress
+                                    onPressed: scanInProgress || _cpuBusy
                                         ? null
                                         : () async {
                                             if (appState.connector!.device ==
@@ -725,6 +727,9 @@ class ReadCardPageState extends State<ReadCardPage> {
                 ),
               ),
             ),
+            CpuCardMenu(readOnly: true, embedded: true,
+              enabled: !scanInProgress && !isContinuousHFScan && !isContinuousLFScan,
+              onBusyChanged: (busy) { if (mounted) setState(() => _cpuBusy = busy); }),
             Center(
               child: Card(
                 elevation: 3,
@@ -761,7 +766,7 @@ class ReadCardPageState extends State<ReadCardPage> {
                                 SizedBox(
                                   width: double.infinity,
                                   child: ElevatedButton(
-                                    onPressed: scanInProgress
+                                    onPressed: scanInProgress || _cpuBusy
                                         ? null
                                         : () async {
                                             if (appState.connector!.device ==

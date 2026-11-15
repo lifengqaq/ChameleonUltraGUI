@@ -143,7 +143,7 @@ class _FileDialogState extends State<_FileDialog> {
         if (!_root && widget.newType == null && !widget.filesystem.nodes.any((n)=>n.parent == widget.index))
           TextButton(onPressed:_delete,child:Text(l.cpu_files_delete)),
         TextButton(onPressed:()=>Navigator.pop(context),child:Text(l.cancel)),
-        FilledButton(onPressed:_save,child:Text(l.cpu_save)),
+        FilledButton(onPressed:_save,child:Text(l.ok)),
       ],
     );
   }

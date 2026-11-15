@@ -1,3 +1,4 @@
+import 'package:chameleonultragui/helpers/definitions.dart';
 import 'dart:typed_data';
 
 import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
@@ -164,14 +165,17 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(390, 844));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(ChangeNotifierProvider.value(
+      value: ChameleonGUIState(prefs), child: _app(const SingleChildScrollView(child: CpuCardMenu(readOnly:true,embedded:true))),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.byType(TabBar), findsNothing);
+    expect(find.byType(TextField), findsNothing);
+    expect(find.text('JSON'), findsNothing);
+    await tester.pumpWidget(ChangeNotifierProvider.value(
       value: ChameleonGUIState(prefs), child: _app(const CpuCardMenu()),
     ));
     await tester.pumpAndSettle();
-    expect(find.text('Read'), findsOneWidget);
-    expect(find.byType(TextField), findsNothing);
-    expect(find.text('JSON'), findsNothing);
-    await tester.tap(find.text('Emulate'));
-    await tester.pumpAndSettle();
+    expect(find.text('Read'), findsNothing);
     expect(find.text('No emulation profile yet'), findsOneWidget);
     expect(find.text('CPU card'), findsNothing);
     await tester.tap(find.text('Advanced'));
@@ -180,4 +184,38 @@ void main() {
     expect(find.text('JSON'), findsNothing);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('real radio values survive expansion, rereading and resize', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(320,760));
+    addTearDown(()=>tester.binding.setSurfaceSize(null));
+    var identity = CardData(uid:cpuHex('CB2E2033'),atqa:cpuHex('0400'),sak:0x20,
+      ats:cpuHex('0D7880A002808660907319A500'));
+    late StateSetter update;
+    await tester.pumpWidget(_app(MediaQuery(
+      data:const MediaQueryData(textScaler:TextScaler.linear(1.3)),
+      child:StatefulBuilder(builder:(context,setState) {
+        update=setState;
+        return ListView(padding:const EdgeInsets.all(16),children:[
+          CpuIdentityPanel(identity:identity),
+          CpuEmvSummaryPanel(summary:summarizeCpuEmv(_sample())),
+        ]);
+      })),locale:const Locale('zh')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('射频参数'));
+    await tester.pumpAndSettle();
+    expect(find.text('ATQA'),findsOneWidget);
+    expect(tester.takeException(),isNull);
+    update(()=>identity=CardData(uid:cpuHex('07589D5E'),atqa:cpuHex('0400'),sak:0x20,
+      ats:cpuHex('0D7880A002808660907319A500')));
+    await tester.pumpAndSettle();
+    expect(find.text('07 58 9D 5E'),findsOneWidget);
+    await tester.binding.setSurfaceSize(const Size(844,390));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(),isNull);
+    await tester.binding.setSurfaceSize(const Size(360,780));
+    await tester.pumpAndSettle();
+    expect(find.text('ATQA'),findsOneWidget);
+    expect(tester.takeException(),isNull);
+  });
+
 }
