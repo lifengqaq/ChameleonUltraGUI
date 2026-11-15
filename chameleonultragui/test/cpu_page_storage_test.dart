@@ -95,6 +95,9 @@ void main() {
     final scrollable = _scrollable(list);
     for (final title in [l.cpu_raw_log, l.cpu_profile_json]) {
       await tester.scrollUntilVisible(find.text(title), 160, scrollable: scrollable);
+      await tester.pumpAndSettle();
+      await Scrollable.ensureVisible(tester.element(find.text(title)), alignment: 0.4);
+      await tester.pumpAndSettle();
       await tester.tap(find.text(title));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
