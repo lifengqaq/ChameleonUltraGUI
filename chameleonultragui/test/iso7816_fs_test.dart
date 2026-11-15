@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:chameleonultragui/gui/menu/tools/cpu_filesystem.dart';
 import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
 import 'package:flutter/material.dart';
@@ -144,6 +145,15 @@ void main() {
     expect(result?.nodes.length,2);
     expect(result?.nodes.last.data,[1,2,3,4]);
     expect(tester.takeException(),isNull);
+  });
+
+  test('delivered JSON examples load through the real profile codec', () {
+    for(final name in ['CPU文件系统示例.json','CPU-NDEF文件系统示例.json']) {
+      final card=cpuProfileFromJson(File('../examples/$name').readAsStringSync());
+      final image=cpuFilesystemFromData(card.data)!;
+      expect(CpuFileSystem.decode(image).nodes.length,4);
+      expect(cpuProfileFromJson(cpuSavedProfileJson(card)).data.single,image);
+    }
   });
 
 }

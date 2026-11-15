@@ -164,15 +164,15 @@ class SlotManagerPageState extends State<SlotManagerPage> {
       setUploadState(0);
       await appState.communicator!.setReaderDeviceMode(false);
       await appState.communicator!
-          .enableSlot(gridPosition, TagFrequency.hf, true);
+          .enableSlot(gridPosition, TagFrequency.hf, false);
       await appState.communicator!.activateSlot(gridPosition);
-      await appState.communicator!.setSlotType(gridPosition, card.tag);
-      await appState.communicator!.setDefaultDataToSlot(gridPosition, card.tag);
+      await prepareHf14a4Slot(appState.communicator!,gridPosition);
       await writeHf14a4SlotIdentity(appState.communicator!, card);
       await appState.communicator!.setSlotTagName(
           gridPosition,
           (card.name.isEmpty) ? localizations.no_name : card.name,
           TagFrequency.hf);
+      await appState.communicator!.enableSlot(gridPosition, TagFrequency.hf, true);
       await appState.communicator!.saveSlotData();
       setUploadState(100);
       appState.changesMade();

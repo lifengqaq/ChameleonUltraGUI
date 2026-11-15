@@ -1,0 +1,47 @@
+{
+  "format": "chameleon-iso14443-4",
+  "version": 2,
+  "name": "通用 CPU 文件系统示例（非实体卡备份）",
+  "uid": "04010203040506",
+  "atqa": "0400",
+  "sak": "20",
+  "ats": "0208",
+  "filesystem": {
+    "nodes": [
+      {
+        "parent": null,
+        "type": "df",
+        "fid": "3F00"
+      },
+      {
+        "parent": 0,
+        "type": "df",
+        "fid": "1001",
+        "aid": "F0010203040506"
+      },
+      {
+        "parent": 1,
+        "type": "binary",
+        "fid": "1002",
+        "sfi": 2,
+        "access": [
+          "read",
+          "write"
+        ],
+        "data": "000441424344"
+      },
+      {
+        "parent": 1,
+        "type": "records",
+        "fid": "1003",
+        "sfi": 4,
+        "access": [
+          "read",
+          "write"
+        ],
+        "recordLength": 4,
+        "data": "0102030405060708"
+      }
+    ]
+  }
+}

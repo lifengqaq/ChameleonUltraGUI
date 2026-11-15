@@ -23,14 +23,6 @@ Future<void> writeHf14a4SlotIdentity(
   if (pairs.isNotEmpty && !supported) {
     throw StateError('APDU table upload requires updated ISO-DEP firmware');
   }
-  await communicator.setMf1AntiCollision(
-    CardData(
-      uid: hexToBytes(card.uid),
-      atqa: card.atqa,
-      sak: card.sak,
-      ats: card.ats,
-    ),
-  );
   if (image != null) {
     await communicator.hf14a4WriteFilesystem(image);
   } else if (supported) {
@@ -39,6 +31,14 @@ Future<void> writeHf14a4SlotIdentity(
       await communicator.hf14a4AddStaticResponse(pair.command, pair.response);
     }
   }
+  await communicator.setMf1AntiCollision(
+    CardData(
+      uid: hexToBytes(card.uid),
+      atqa: card.atqa,
+      sak: card.sak,
+      ats: card.ats,
+    ),
+  );
 }
 
 Future<CardSave> readHf14a4SlotIdentity(
@@ -64,4 +64,16 @@ Future<CardSave> readHf14a4SlotIdentity(
       for (final pair in pairs) ...[pair.command, pair.response],
     ],
   );
+}
+
+
+/// Preserve an existing CPU slot until the staged filesystem has committed.
+Future<void> prepareHf14a4Slot(ChameleonCommunicator communicator, int slot) async {
+  if (slot < 0 || slot > 7) throw RangeError.range(slot,0,7,'slot');
+  final types = await communicator.getSlotTagTypes();
+  if (types.length <= slot) throw const FormatException('设备返回的卡槽列表不完整');
+  if (types[slot].hf != TagType.hf14a4) {
+    await communicator.setSlotType(slot,TagType.hf14a4);
+    await communicator.setDefaultDataToSlot(slot,TagType.hf14a4);
+  }
 }

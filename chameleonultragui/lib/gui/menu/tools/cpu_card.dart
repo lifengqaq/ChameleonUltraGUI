@@ -232,8 +232,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
     if (mounted) setState(() => _session = false);
     await device.enableSlot(_slot, TagFrequency.hf, false);
     await device.activateSlot(_slot);
-    await device.setSlotType(_slot, TagType.hf14a4);
-    await device.setDefaultDataToSlot(_slot, TagType.hf14a4);
+    await prepareHf14a4Slot(device, _slot);
     await writeHf14a4SlotIdentity(device, card);
     await device.setSlotTagName(_slot, card.name, TagFrequency.hf);
     await device.enableSlot(_slot, TagFrequency.hf, true);
