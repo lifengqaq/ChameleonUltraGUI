@@ -1,3 +1,4 @@
+import 'package:chameleonultragui/helpers/hf14a4_slot.dart';
 import 'dart:typed_data';
 
 import 'package:chameleonultragui/bridge/chameleon.dart';
@@ -47,6 +48,14 @@ List<int> identityBytes() => [
   ...identity.ats,
 ];
 void main() {
+  test('shared identity helper leaves MIFARE block dumps out of CPU validation', () async {
+    final device = Device()..reply(0x68, []);
+    final card = CardSave(uid: '01020304', name: 'EV1', tag: TagType.mifare2K,
+        atqa: Uint8List(2), data: List.generate(72, (i) => Uint8List(16)));
+    await writeHf14a4SlotIdentity(device, card);
+    expect(device.calls.single.$1, ChameleonCommand.mf1SetAntiCollision);
+  });
+
   test('strict hex and full identity bounds', () {
     expect(cpuHex('00 A4\n04'), [0, 0xA4, 4]);
     for (final value in ['0', 'GG', '0x00']) {

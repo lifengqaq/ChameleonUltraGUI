@@ -27,7 +27,7 @@ jobs:
       - name: Run CPU and compatibility regressions
         run: >-
           flutter test test/iso14443_4_test.dart test/hf14a4_card_type_test.dart
-          test/raw_commands_test.dart
+          test/raw_commands_test.dart test/plugin_extensions_test.dart
       - name: Produce formatting patch
         if: always()
         run: |

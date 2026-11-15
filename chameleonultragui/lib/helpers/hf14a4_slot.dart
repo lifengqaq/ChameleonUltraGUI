@@ -10,8 +10,11 @@ Future<void> writeHf14a4SlotIdentity(
   ChameleonCommunicator communicator,
   CardSave card,
 ) async {
-  final pairs = cpuRulesFromData(card.data);
-  final supported = (await communicator.getDeviceCapabilities()).contains(
+  final pairs = card.tag == TagType.hf14a4
+      ? cpuRulesFromData(card.data)
+      : <CpuApduPair>[];
+  final supported = card.tag == TagType.hf14a4 &&
+      (await communicator.getDeviceCapabilities()).contains(
     ChameleonCommand.hf14a4StaticRead.value,
   );
   if (pairs.isNotEmpty && !supported) {
