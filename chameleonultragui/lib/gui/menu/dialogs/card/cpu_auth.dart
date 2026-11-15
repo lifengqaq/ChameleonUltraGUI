@@ -22,7 +22,7 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
   late CpuAuthMethod _method;
   late CpuPinEncoding _encoding;
   late final TextEditingController _credential, _reference, _algorithm;
-  bool _busy = false, _transportFailed = false;
+  bool _busy = false, _sending = false, _transportFailed = false;
   CpuAuthResult? _result;
   String? _error;
   CpuAuthSettings get _settings => CpuAuthSettings(method: _method,
@@ -74,7 +74,7 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
         return;
       }
     }
-    setState(() { _busy = true; _error = null; });
+    setState(() { _busy = true; _sending = true; _error = null; });
     try {
       final result = await authenticateCpuCard(settings, _credential.text, widget.exchange);
       widget.history.record(settings, result);
@@ -86,7 +86,7 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
     } catch (_) {
       // Delivery could have succeeded before a timeout: never retry automatically.
       if (mounted) setState(() { _transportFailed = true; _error = l.cpu_auth_transport_unknown; });
-    } finally { if (mounted) setState(() => _busy = false); }
+    } finally { if (mounted) setState(() { _busy = false; _sending = false; }); }
   }
   @override
   Widget build(BuildContext context) {
@@ -136,7 +136,7 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
                 style: TextStyle(color: _result!.blocked || _result!.remaining == 1 ? errorColor : null)),
             ],
             if (_error != null) Text(_error!, style: TextStyle(color: errorColor)),
-            if (_busy) const LinearProgressIndicator(),
+            if (_sending) const LinearProgressIndicator(),
           ]))),
       actions: [TextButton(onPressed: _busy ? null : () => Navigator.pop(context, false), child: Text(l.cancel)),
         FilledButton(key: const ValueKey('cpu-auth-submit'),

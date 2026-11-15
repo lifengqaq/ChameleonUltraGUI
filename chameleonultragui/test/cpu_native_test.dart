@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
 import 'package:chameleonultragui/gui/menu/dialogs/card/cpu_dump.dart';
+import 'package:chameleonultragui/gui/menu/pages/cpu_data_editor.dart';
 import 'package:chameleonultragui/helpers/cpu_dump.dart';
 import 'package:chameleonultragui/helpers/cpu_security.dart';
 import 'package:chameleonultragui/helpers/definitions.dart';
@@ -118,6 +119,63 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton,'Save'));await tester.pumpAndSettle();
     expect(result!.uid,'01 02 03 04');expect(result!.tag,TagType.hf14a4);
     expect(result!.data,isEmpty);expect(result!.extraData.cpuDump,isEmpty);
+    expect(tester.takeException(),isNull);
+  });
+
+  test('EOF before the advertised file length stays incomplete', () async {
+    final reader=CpuDumpReader(exchange:(command) async {
+      if(command[1]==0xA4)return cpuHex('6207820101800200049000');
+      return cpuHex('41426282');
+    },authenticate:() async=>throw StateError('Unexpected auth'));
+    final result=await reader.read(parseCpuDumpPaths('1001'));
+    expect(result.files.single.data,[65,66]);
+    expect(result.files.single.complete,isFalse);
+    expect(result.completeForPlan,isFalse);
+    expect(result.deviceFilesystem(),isNull);
+  });
+  test('an advertised EMV record missing before the end is incomplete', () async {
+    final reader=CpuDumpReader(exchange:(command) async {
+      if(command[1]==0xA4)return cpuHex('9000');
+      return command[2]==1 ? cpuHex('010203049000') : cpuHex('6A83');
+    },authenticate:() async=>throw StateError('Unexpected auth'));
+    final result=await reader.read([CpuDumpTarget([],aid:cpuHex('A0000000031010'),
+      type:2,sfi:1,firstRecord:1,lastRecord:2)]);
+    expect(result.files.single.complete,isFalse);
+    expect(result.completeForPlan,isFalse);
+  });
+  testWidgets('native data JSON edits preserve identity, card ID, folder and classification', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(500,1000));
+    addTearDown(()=>tester.binding.setSurfaceSize(null));
+    final original=CardSave(id:'existing-id',uid:'01 02 03 04',name:'Original',
+      tag:TagType.hf14a4,sak:0x20,atqa:cpuHex('0400'),ats:cpuHex('0208'),
+      folderId:'existing-folder',color:Colors.blue,
+      extraData:CardSaveExtra(cpuApplication:'ndef'),data:[CpuFileSystem.example().encode()]);
+    CardSave? result;
+    await tester.pumpWidget(MaterialApp(locale:const Locale('en'),
+      localizationsDelegates:AppLocalizations.localizationsDelegates,
+      supportedLocales:AppLocalizations.supportedLocales,
+      home:Builder(builder:(context)=>Scaffold(body:TextButton(child:const Text('Open'),
+        onPressed:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>
+          CpuDataEditor(card:original,onSave:(value)=>result=value))))))));
+    await tester.tap(find.text('Open'));await tester.pumpAndSettle();
+    final title=find.text(AppLocalizations.of(tester.element(find.byType(CpuDataEditor)))!.cpu_profile_json);
+    await tester.scrollUntilVisible(title,200,scrollable:find.descendant(
+      of:find.byKey(const PageStorageKey('cpu-native-data-scroll')),matching:find.byType(Scrollable)).first);
+    await tester.ensureVisible(title);await tester.tap(title);await tester.pumpAndSettle();
+    final editor=find.byKey(const PageStorageKey('cpu-native-json-scroll'));
+    await tester.ensureVisible(editor);
+    final changed=CpuFileSystem([CpuFileNode(parent:255,type:0,fid:0x3F00),
+      CpuFileNode(parent:0,type:1,fid:0x1001,access:1,data:[9,8,7])]);
+    await tester.enterText(editor,cpuProfileJson(CardData(uid:cpuHex('AABBCCDD'),
+      sak:0x20,atqa:cpuHex('0000'),ats:cpuHex('0208')),[],name:'Replacement',filesystem:changed));
+    FocusManager.instance.primaryFocus?.unfocus();await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton,'Save'));await tester.pumpAndSettle();
+    expect(result,isNotNull);expect(result!.id,original.id);expect(result!.uid,original.uid);
+    expect(result!.name,original.name);expect(result!.sak,original.sak);
+    expect(result!.atqa,original.atqa);expect(result!.ats,original.ats);
+    expect(result!.folderId,original.folderId);expect(result!.color,original.color);
+    expect(result!.extraData.cpuApplication,'ndef');
+    expect(CpuFileSystem.decode(result!.data.single).nodes.last.data,[9,8,7]);
     expect(tester.takeException(),isNull);
   });
 }

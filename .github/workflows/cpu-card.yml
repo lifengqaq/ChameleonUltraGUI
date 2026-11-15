@@ -37,7 +37,9 @@ jobs:
       - name: Run full GUI and compatibility regressions
         env:
           LIBRECOVERY_PATH: ${{ github.workspace }}/chameleonultragui/build/native-recovery/librecovery.so
-        run: flutter test
+        run: |
+          set -o pipefail
+          flutter test --reporter expanded 2>&1 | tee cpu-test.log
       - name: Produce formatting patch
         if: always()
         run: |
@@ -47,4 +49,6 @@ jobs:
         if: always()
         with:
           name: cpu-source-format
-          path: chameleonultragui/cpu-format.patch
+          path: |
+            chameleonultragui/cpu-format.patch
+            chameleonultragui/cpu-test.log

@@ -176,9 +176,11 @@ class CpuDumpReader {
         final descriptor = descriptors.isEmpty ? Uint8List(0) : descriptors.first;
         final record = target.type == 2 || (descriptor.isNotEmpty && [2, 6].contains(descriptor.first & 7));
         var length = 0;
+        var lengthKnown = false;
         for (final tag in [0x80, 0x81]) {
           final sizes = cpuFindTlv(fci, tag);
-          if (sizes.isNotEmpty && sizes.first.length <= 3) {
+          if (sizes.isNotEmpty && sizes.first.isNotEmpty && sizes.first.length <= 3) {
+            lengthKnown = true;
             for (final b in sizes.first) { length = length << 8 | b; }
             break;
           }
@@ -191,7 +193,7 @@ class CpuDumpReader {
           for (var n = target.firstRecord; n <= count && n <= 254; n++) {
             final response = await _read(Uint8List.fromList([0, 0xB2, n, target.sfi << 3 | 4, 0]));
             final status = _status(response);
-            if (status == 0x6A83) { complete = true; break; }
+            if (status == 0x6A83) { complete = target.sfi == 0 && descriptor.length < 5; break; }
             if (status != 0x9000) throw CpuReadFailure(status);
             final data = response.sublist(0, response.length - 2);
             if (data.isEmpty || (recordLength != 0 && data.length != recordLength)) {
@@ -204,7 +206,7 @@ class CpuDumpReader {
         } else {
           var offset = 0;
           while (offset < 32768 && remaining > 0) {
-            var count = length > 0 ? length - offset : 200;
+            var count = lengthKnown ? length - offset : 200;
             if (count <= 0) { complete = true; break; }
             if (count > 200) count = 200;
             if (count > remaining) count = remaining;
@@ -214,7 +216,10 @@ class CpuDumpReader {
             final data = response.sublist(0, response.length - 2);
             if (data.length > count) throw const FormatException('Oversized READ response');
             bytes.add(data); offset += data.length; remaining -= data.length;
-            if (status == 0x6282 || data.isEmpty || (length > 0 && offset == length)) { complete = true; break; }
+            if (status == 0x6282 || data.isEmpty) {
+              complete = !lengthKnown || offset == length; break;
+            }
+            if (lengthKnown && offset == length) { complete = true; break; }
           }
         }
         result.files.add(CpuDumpFile(target, bytes.toBytes(), fci, record ? 2 : 1, recordLength,
