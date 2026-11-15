@@ -173,7 +173,7 @@ void main() {
     expect(result,isNotNull);expect(result!.id,original.id);expect(result!.uid,original.uid);
     expect(result!.name,original.name);expect(result!.sak,original.sak);
     expect(result!.atqa,original.atqa);expect(result!.ats,original.ats);
-    expect(result!.folderId,original.folderId);expect(result!.color,original.color);
+    expect(result!.folderId,original.folderId);expect(result!.color.toARGB32(),original.color.toARGB32());
     expect(result!.extraData.cpuApplication,'ndef');
     expect(CpuFileSystem.decode(result!.data.single).nodes.last.data,[9,8,7]);
     expect(tester.takeException(),isNull);
