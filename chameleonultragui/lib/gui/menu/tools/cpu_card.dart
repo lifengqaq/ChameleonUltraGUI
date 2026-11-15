@@ -302,7 +302,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
   }
 
   Widget _readerTab(AppLocalizations l, bool online) => ListView(
-    key: const PageStorageKey('cpu-reader'),
+    key: const PageStorageKey('cpu-reader-scroll'),
     shrinkWrap: widget.embedded,
     primary: false,
     physics: widget.embedded ? const NeverScrollableScrollPhysics() : null,
@@ -358,7 +358,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
       if (_profile.text.trim().isNotEmpty) profileTitle = l.cpu_profile_invalid;
     }
     return ListView(
-      key: const PageStorageKey('cpu-simulation'),
+      key: const PageStorageKey('cpu-simulation-scroll'),
       padding: const EdgeInsets.all(16),
       children: [
         Text(l.cpu_emulation_title, style: Theme.of(context).textTheme.titleLarge),
@@ -442,7 +442,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
   }
 
   Widget _advancedTab(AppLocalizations l, bool online) => ListView(
-    key: const PageStorageKey('cpu-advanced'),
+    key: const PageStorageKey('cpu-advanced-scroll'),
     padding: const EdgeInsets.all(16),
     children: [
       Text(l.cpu_reader, style: Theme.of(context).textTheme.titleLarge),
@@ -475,6 +475,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
       ),
       const SizedBox(height: 12),
       TextField(
+        key: const PageStorageKey('cpu-command-editor-scroll'),
         controller: _commands, enabled: !_busy, minLines: 2, maxLines: 6,
         style: const TextStyle(fontFamily: 'monospace'),
         decoration: InputDecoration(labelText: l.cpu_apdu, helperText: l.cpu_script_help,
@@ -491,12 +492,13 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
       ),
       const SizedBox(height: 16),
       ExpansionTile(
+        key: const PageStorageKey('cpu-log-expanded'),
         tilePadding: EdgeInsets.zero,
         title: Text(l.cpu_raw_log),
         children: [
           if (_log.isEmpty) Text(l.cpu_log_empty)
-          else Align(alignment: Alignment.centerLeft, child: SelectableText(
-            _log, style: const TextStyle(fontFamily: 'monospace', fontSize: 12))),
+          else Align(alignment: Alignment.centerLeft, child: SelectionArea(child: Text(
+            _log, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)))),
           Wrap(spacing: 8, children: [
             TextButton(
               onPressed: _log.isEmpty ? null : () => Clipboard.setData(ClipboardData(text: _log)),
@@ -510,12 +512,14 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
         ],
       ),
       ExpansionTile(
+        key: const PageStorageKey('cpu-profile-expanded'),
         tilePadding: EdgeInsets.zero,
         title: Text(l.cpu_profile_json),
         children: [
           Text(l.cpu_profile_help),
           const SizedBox(height: 12),
           TextField(
+            key: const PageStorageKey('cpu-profile-editor-scroll'),
             controller: _profile, enabled: !_busy, minLines: 6, maxLines: 16,
             onChanged: (_) => setState(() {}),
             style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
@@ -582,7 +586,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
                   child: Row(children: [
                     Icon(_messageIsError ? Icons.error_outline : Icons.info_outline),
                     const SizedBox(width: 10),
-                    Expanded(child: SelectableText(_message)),
+                    Expanded(child: SelectionArea(child: Text(_message))),
                     IconButton(onPressed: () => setState(() => _message = ''),
                       icon: const Icon(Icons.close), tooltip: l.cpu_close),
                   ]),

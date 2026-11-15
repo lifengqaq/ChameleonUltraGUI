@@ -111,11 +111,11 @@ class _FileDialogState extends State<_FileDialog> {
     final l = AppLocalizations.of(context)!;
     return AlertDialog(
       title: Text(l.cpu_files_edit),
-      content: SizedBox(width: 480, child: SingleChildScrollView(child: Column(
+      content: SizedBox(width: 480, child: SingleChildScrollView(key: const PageStorageKey('cpu-file-editor-scroll'), child: Column(
         mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (_error != null) Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-          TextField(controller: _fid, enabled: !_root, decoration: const InputDecoration(labelText: 'FID (hex)')),
+          TextField(key:const PageStorageKey('cpu-fid-editor-scroll'),controller:_fid, enabled: !_root, decoration: const InputDecoration(labelText: 'FID (hex)')),
           if (!_root) ...[
             DropdownButtonFormField<int>(value:_parent,isExpanded:true,
               decoration: InputDecoration(labelText:l.cpu_files_parent),
@@ -127,16 +127,16 @@ class _FileDialogState extends State<_FileDialog> {
               items:[for (var i=0;i<3;i++) DropdownMenuItem(value:i,child:Text(['DF','EF BINARY','EF RECORDS'][i]))],
               onChanged:(v)=>setState(()=>_type=v!)),
           ],
-          if (_type == 0 && !_root) TextField(controller:_aid,decoration:const InputDecoration(labelText:'AID (hex)')),
+          if (_type == 0 && !_root) TextField(key:const PageStorageKey('cpu-aid-editor-scroll'),controller:_aid,decoration:const InputDecoration(labelText:'AID (hex)')),
           if (_type != 0) ...[
-            TextField(controller:_sfi,keyboardType:TextInputType.number,decoration:const InputDecoration(labelText:'SFI (0–30)')),
+            TextField(key:const PageStorageKey('cpu-sfi-editor-scroll'),controller:_sfi,keyboardType:TextInputType.number,decoration:const InputDecoration(labelText:'SFI (0–30)')),
             CheckboxListTile(contentPadding:EdgeInsets.zero,title:Text(l.cpu_files_read),value:_read,onChanged:(v)=>setState(()=>_read=v!)),
             CheckboxListTile(contentPadding:EdgeInsets.zero,title:Text(l.cpu_files_write),value:_write,onChanged:(v)=>setState(()=>_write=v!)),
-            if (_type == 2) TextField(controller:_record,keyboardType:TextInputType.number,decoration:InputDecoration(labelText:l.cpu_files_record_length)),
-            TextField(controller:_data,minLines:2,maxLines:5,style:const TextStyle(fontFamily:'monospace'),decoration:InputDecoration(labelText:l.cpu_files_data)),
+            if (_type == 2) TextField(key:const PageStorageKey('cpu-record-editor-scroll'),controller:_record,keyboardType:TextInputType.number,decoration:InputDecoration(labelText:l.cpu_files_record_length)),
+            TextField(key:const PageStorageKey('cpu-data-editor-scroll'),controller:_data,minLines:2,maxLines:5,style:const TextStyle(fontFamily:'monospace'),decoration:InputDecoration(labelText:l.cpu_files_data)),
           ],
-          ExpansionTile(tilePadding:EdgeInsets.zero,title:Text(l.cpu_files_custom_fci),children:[
-            TextField(controller:_fci,minLines:2,maxLines:4,decoration:const InputDecoration(labelText:'FCI (hex, without SW1/SW2)')),
+          ExpansionTile(key:const PageStorageKey('cpu-fci-expanded'),tilePadding:EdgeInsets.zero,title:Text(l.cpu_files_custom_fci),children:[
+            TextField(key:const PageStorageKey('cpu-fci-editor-scroll'),controller:_fci,minLines:2,maxLines:4,decoration:const InputDecoration(labelText:'FCI (hex, without SW1/SW2)')),
           ]),
         ]))),
       actions:[

@@ -54,7 +54,7 @@ class CpuInfoRow extends StatelessWidget {
           width: 104,
           child: Text(label, style: Theme.of(context).textTheme.bodySmall),
         ),
-        Expanded(child: SelectableText(value)),
+        Expanded(child: SelectionArea(child: Text(value))),
       ],
     ),
   );
@@ -185,6 +185,7 @@ class CpuIdentityPanel extends StatelessWidget {
               CpuInfoRow(label: 'UID', value: bytesToHexSpace(identity.uid)),
               Text(l.cpu_type_a, style: Theme.of(context).textTheme.bodySmall),
               ExpansionTile(
+                key: const PageStorageKey('cpu-radio-expanded'),
                 tilePadding: EdgeInsets.zero,
                 title: Text(l.cpu_radio_details),
                 children: [

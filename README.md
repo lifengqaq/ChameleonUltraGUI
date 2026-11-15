@@ -1,6 +1,8 @@
 # Chameleon Ultra GUI
 A GUI for the Chameleon Ultra/Chameleon Lite written in Flutter for cross platform operation
 
+This branch adds device-side ISO 14443-4 / CPU card emulation. After uploading and saving a slot, the firmware responds to readers without a phone or computer. See [CPU filesystem setup and offline verification](CPU-FILESYSTEM.md).
+
 [![Auto build](https://github.com/GameTec-live/ChameleonUltraGUI/actions/workflows/build-app.yml/badge.svg)](https://github.com/GameTec-live/ChameleonUltraGUI/actions/workflows/build-app.yml) 
 [![Open collective](https://opencollective.com/chameleon-ultra-gui/tiers/badge.svg)](https://opencollective.com/chameleon-ultra-gui#support)
 [![Crowdin](https://badges.crowdin.net/chameleonultragui/localized.svg)](https://crowdin.com/project/chameleonultragui)
