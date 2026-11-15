@@ -19,6 +19,13 @@ Uint8List cpuHex(String text, {int min = 0, int max = 260}) {
   ]);
 }
 
+class CpuCommandError extends StateError {
+  final int command;
+  final int? status;
+  CpuCommandError(this.command, this.status)
+      : super('ISO-DEP $command: ${status == null ? "no response" : "status 0x${status.toRadixString(16)}"}');
+}
+
 class CpuApduPair {
   final Uint8List command;
   final Uint8List response;

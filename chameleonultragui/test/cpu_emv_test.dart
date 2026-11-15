@@ -54,6 +54,16 @@ Widget _app(Widget child, {Locale locale = const Locale('en')}) => MaterialApp(
 );
 
 void main() {
+  testWidgets('RF status uses an actionable localized message', (tester) async {
+    await tester.pumpWidget(_app(Builder(builder: (context) => Text(
+      cpuCommandErrorText(AppLocalizations.of(context)!, CpuCommandError(6005, 1)),
+    )), locale: const Locale('zh')));
+    await tester.pumpAndSettle();
+    expect(find.text('未检测到卡片。请贴紧 Ultra 高频天线后重试。'), findsOneWidget);
+    expect(find.textContaining('Bad state'), findsNothing);
+    expect(find.textContaining('0x1'), findsNothing);
+  });
+
   test('PBOC format 2 summary masks PAN and recognizes GPO without AFL', () {
     final result = summarizeCpuEmv(_sample());
     expect(result.applicationLabel, 'PBOC DEBIT');

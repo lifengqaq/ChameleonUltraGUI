@@ -48,6 +48,15 @@ List<int> identityBytes() => [
   ...identity.ats,
 ];
 void main() {
+  test('CPU failures retain structured command and RF status', () async {
+    final device = Device()..reply(1, []);
+    await expectLater(device.hf14a4EmvScan(), throwsA(
+      isA<CpuCommandError>()
+        .having((error) => error.command, 'command', 6005)
+        .having((error) => error.status, 'status', 1),
+    ));
+  });
+
   test('shared identity helper leaves MIFARE block dumps out of CPU validation', () async {
     final device = Device()..reply(0x68, []);
     final card = CardSave(uid: '01020304', name: 'EV1', tag: TagType.mifare2K,

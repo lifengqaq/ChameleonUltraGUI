@@ -862,5 +862,15 @@
   "cpu_raw_log": "Raw exchange log",
   "cpu_log_empty": "No exchanges yet. Identifying a card or starting an EMV read clears the previous log.",
   "cpu_clear_log": "Clear log",
-  "cpu_profile_json": "Emulation profile JSON"
+  "cpu_profile_json": "Emulation profile JSON",
+  "cpu_error_no_response": "No response from the device. Check the connection and try again.",
+  "cpu_error_no_card": "No card detected. Hold it against the Ultra HF antenna and try again.",
+  "cpu_error_collision": "Multiple cards detected. Present only one card.",
+  "cpu_error_ats": "The card did not complete ISO-DEP negotiation. Present it again.",
+  "cpu_error_rf": "Card communication failed. Hold the card steady and read again.",
+  "cpu_error_parameters": "Check the APDU parameters or emulation profile.",
+  "cpu_error_mode": "The device mode changed. Reconnect before reading.",
+  "cpu_error_firmware": "Update to the matching firmware to use this function.",
+  "cpu_error_slot": "The selected slot type does not match this operation.",
+  "cpu_error_device": "The device operation failed. Details are available in the Advanced log."
 }

@@ -1,6 +1,21 @@
 import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
 import 'package:chameleonultragui/helpers/cpu_emv.dart';
+import 'package:chameleonultragui/helpers/iso14443_4.dart';
 import 'package:flutter/material.dart';
+
+String cpuCommandErrorText(AppLocalizations l, CpuCommandError error) =>
+    switch (error.status) {
+      null => l.cpu_error_no_response,
+      0x01 => l.cpu_error_no_card,
+      0x04 => l.cpu_error_collision,
+      0x08 => l.cpu_error_ats,
+      0x02 || 0x03 || 0x05 || 0x07 => l.cpu_error_rf,
+      0x60 => l.cpu_error_parameters,
+      0x66 => l.cpu_error_mode,
+      0x67 || 0x69 => l.cpu_error_firmware,
+      0x72 => l.cpu_error_slot,
+      _ => l.cpu_error_device,
+    };
 
 String cpuStatusText(AppLocalizations l, int status) =>
     switch (cpuStatusMeaning(status)) {

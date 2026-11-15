@@ -687,5 +687,15 @@
   "cpu_raw_log": "原始交互日志",
   "cpu_log_empty": "暂无交互。每次识别或 EMV 读取会清空上一次日志。",
   "cpu_clear_log": "清空日志",
-  "cpu_profile_json": "模拟配置 JSON"
+  "cpu_profile_json": "模拟配置 JSON",
+    "cpu_error_no_response": "设备未返回结果，请检查连接后重试。",
+    "cpu_error_no_card": "未检测到卡片。请贴紧 Ultra 高频天线后重试。",
+    "cpu_error_collision": "检测到多张卡片，请只保留一张。",
+    "cpu_error_ats": "卡片未完成 ISO-DEP 协商，请重新放卡。",
+    "cpu_error_rf": "卡片通信失败，请贴稳卡片后重新读取。",
+    "cpu_error_parameters": "指令参数有误，请检查 APDU 或模拟配置。",
+    "cpu_error_mode": "设备模式已变化，请重新连接设备后读卡。",
+    "cpu_error_firmware": "固件缺少此功能，请更新配套固件。",
+    "cpu_error_slot": "卡槽类型与当前操作不匹配，请检查所选卡槽。",
+    "cpu_error_device": "设备操作失败，详细状态保留在高级页日志。"
 }

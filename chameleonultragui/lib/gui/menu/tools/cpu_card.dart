@@ -61,6 +61,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
 
   Future<void> _run(Future<void> Function() operation) async {
     if (_busy) return;
+    final l = AppLocalizations.of(context)!;
     setState(() {
       _busy = true;
       _message = '';
@@ -69,10 +70,16 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
     try {
       await operation();
     } catch (error) {
-      if (mounted) setState(() {
-        _message = error.toString();
-        _messageIsError = true;
-      });
+      if (mounted) {
+        _append(error.toString());
+        setState(() {
+          _message = error is CpuCommandError
+              ? cpuCommandErrorText(l, error)
+              : error is StateError ? error.message
+              : error is FormatException ? error.message : error.toString();
+          _messageIsError = true;
+        });
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }

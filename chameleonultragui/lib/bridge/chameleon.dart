@@ -1519,8 +1519,7 @@ class ChameleonCommunicator {
       Duration timeout = const Duration(seconds: 5)}) async {
     final response = await sendCmd(command, data: data, timeout: timeout);
     if (response == null || response.status != success) {
-      throw StateError('ISO-DEP ${command.value}: '
-          '${response == null ? "no response" : "status 0x${response.status.toRadixString(16)}"}');
+      throw CpuCommandError(command.value, response?.status);
     }
     return response.data;
   }
