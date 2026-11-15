@@ -331,7 +331,7 @@ class CardEditMenuState extends State<CardEditMenu> {
                 },
               ),
               if (selectedType == TagType.hf14a4) ...[
-                DropdownButtonFormField<String>(value: cpuApplication,
+                DropdownButtonFormField<String>(isExpanded: true, value: cpuApplication,
                   decoration: InputDecoration(labelText: localizations.cpu_application_type),
                   items: [
                     DropdownMenuItem(value: 'generic', child: Text(localizations.cpu_application_generic)),

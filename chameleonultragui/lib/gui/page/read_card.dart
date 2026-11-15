@@ -265,7 +265,7 @@ class ReadCardPageState extends State<ReadCardPage> {
       setState(() => _cpuBusy = true);
       try {
         final card = await showCpuDumpDialog(context, CardData(uid: hexToBytes(hfInfo.uid),
-          sak: sak.first, atqa: hexToBytes(hfInfo.atqa),
+          sak: sak.isEmpty ? 0x20 : sak.first, atqa: hexToBytes(hfInfo.atqa),
           ats: hfInfo.ats != localizations.no ? hexToBytes(hfInfo.ats) : Uint8List(0)), name: dumpName);
         if (card != null) {
           final cards = appState.sharedPreferencesProvider.getCards()..add(card);

@@ -59,11 +59,21 @@ Uint8List cpuEncryptChallenge(Uint8List key, Uint8List challenge) {
   if (challenge.length != 8 || ![8, 16, 24].contains(key.length)) {
     throw const FormatException('The selected profile requires an 8-byte challenge');
   }
-  final BlockCipher cipher = key.length == 8 ? DESEngine() : DESedeEngine();
-  cipher.init(true, KeyParameter(key));
-  final result = Uint8List(8);
-  cipher.processBlock(challenge, 0, result, 0);
-  return result;
+  // Pointy Castle exposes DESedeEngine. EDE with K1 = K2 = K3 is
+  // exactly single DES, so the same tested engine handles both profiles.
+  final engineKey = key.length == 8
+      ? Uint8List.fromList([...key, ...key, ...key])
+      : Uint8List.fromList(key);
+  final cipher = DESedeEngine();
+  try {
+    cipher.init(true, KeyParameter(engineKey));
+    final result = Uint8List(8);
+    cipher.processBlock(challenge, 0, result, 0);
+    return result;
+  } finally {
+    cipher.reset();
+    engineKey.fillRange(0, engineKey.length, 0);
+  }
 }
 
 int cpuAuthStatus(Uint8List response) {
