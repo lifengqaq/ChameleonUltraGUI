@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:async';
+import 'package:chameleonultragui/helpers/iso14443_4.dart';
 
 import 'package:chameleonultragui/helpers/definitions.dart';
 import 'package:chameleonultragui/helpers/general.dart';
@@ -1513,57 +1514,100 @@ class ChameleonCommunicator {
     );
   }
 
+  Future<Uint8List> _cpuCommand(ChameleonCommand command,
+      {Uint8List? data, int success = 0x68,
+      Duration timeout = const Duration(seconds: 5)}) async {
+    final response = await sendCmd(command, data: data, timeout: timeout);
+    if (response == null || response.status != success) {
+      throw StateError('ISO-DEP ${command.value}: '
+          '${response == null ? "no response" : "status 0x${response.status.toRadixString(16)}"}');
+    }
+    return response.data;
+  }
+
   Future<(int, Uint8List)> hf14a4ApduRecv() async {
-    var resp = (await sendCmd(ChameleonCommand.hf14a4ApduRecv,
-        timeout: const Duration(seconds: 2)))!;
-    return (resp.status, resp.data);
+    final response = (await sendCmd(ChameleonCommand.hf14a4ApduRecv))!;
+    if (response.status != 0x68 && response.status != 1) {
+      throw StateError('APDU receive failed: ${response.status}');
+    }
+    return (response.status, response.data);
   }
 
   Future<void> hf14a4ApduSend(Uint8List response) async {
-    await sendCmd(ChameleonCommand.hf14a4ApduSend,
-        data: Uint8List.fromList([
-          (response.length >> 8) & 0xFF,
-          response.length & 0xFF,
-          ...response
-        ]));
+    if (response.length < 2 || response.length > 260) {
+      throw ArgumentError('Response must be 2–260 bytes including SW1/SW2');
+    }
+    await _cpuCommand(ChameleonCommand.hf14a4ApduSend,
+        data: Uint8List.fromList([response.length >> 8, response.length & 255, ...response]));
   }
 
   Future<void> hf14a4SetAntiColl(
       Uint8List uid, Uint8List atqa, int sak, Uint8List ats) async {
-    await sendCmd(ChameleonCommand.hf14a4SetAntiColl,
-        data: Uint8List.fromList(
-            [uid.length, ...uid, ...atqa, sak, ats.length, ...ats]));
+    if (![4,7,10].contains(uid.length) || atqa.length != 2 ||
+        sak < 0 || sak > 255 || ats.length > 255) {
+      throw ArgumentError('Invalid ISO-DEP identity');
+    }
+    final payload = Uint8List.fromList([uid.length, ...uid, ...atqa, sak, ats.length, ...ats]);
+    parseCpuIdentity(payload);
+    await _cpuCommand(ChameleonCommand.hf14a4SetAntiColl, data: payload);
   }
 
-  Future<void> hf14a4AddStaticResponse(
-      Uint8List cmd, Uint8List response) async {
-    await sendCmd(ChameleonCommand.hf14a4StaticResp,
-        data: Uint8List.fromList([
-          cmd.length,
-          ...cmd,
-          (response.length >> 8) & 0xFF,
-          response.length & 0xFF,
-          ...response
-        ]));
+  Future<void> hf14a4AddStaticResponse(Uint8List cmd, Uint8List response) async {
+    validateCpuRules([CpuApduPair(cmd, response)]);
+    await _cpuCommand(ChameleonCommand.hf14a4StaticResp,
+        data: Uint8List.fromList([cmd.length, ...cmd,
+          response.length >> 8, response.length & 255, ...response]));
   }
 
   Future<void> hf14a4ClearStaticResponses() async {
-    await sendCmd(ChameleonCommand.hf14a4StaticResp,
-        data: Uint8List.fromList([0]));
+    await _cpuCommand(ChameleonCommand.hf14a4StaticResp, data: Uint8List.fromList([0]));
+  }
+
+  Future<List<CpuApduPair>> hf14a4ReadStaticResponses() async {
+    final count = await _cpuCommand(ChameleonCommand.hf14a4StaticRead);
+    if (count.length != 1 || count[0] > 16) throw const FormatException('Invalid response count');
+    final result = <CpuApduPair>[];
+    for (var i=0; i<count[0]; i++) {
+      final bytes = await _cpuCommand(ChameleonCommand.hf14a4StaticRead,
+          data: Uint8List.fromList([i]));
+      if (bytes.isEmpty || bytes[0] == 0 || bytes[0] > 16 || bytes.length < bytes[0]+3) {
+        throw const FormatException('Truncated static response');
+      }
+      final n = bytes[0], length = bytes[bytes[0]+1] << 8 | bytes[bytes[0]+2];
+      if (length < 2 || length > 260 || bytes.length != n+3+length) {
+        throw const FormatException('Invalid static response length');
+      }
+      result.add(CpuApduPair(Uint8List.fromList(bytes.sublist(1,n+1)),
+          Uint8List.fromList(bytes.sublist(n+3))));
+    }
+    validateCpuRules(result);
+    return result;
+  }
+
+  Future<CardData> hf14a4OpenSession() async {
+    final bytes = await _cpuCommand(ChameleonCommand.hf14a4Session,
+        data: Uint8List.fromList([1]), success: 0);
+    final (identity, length) = parseCpuIdentity(bytes);
+    if (length != bytes.length) throw const FormatException('Trailing session data');
+    return identity;
+  }
+
+  Future<void> hf14a4CloseSession() async {
+    await _cpuCommand(ChameleonCommand.hf14a4Session, data: Uint8List.fromList([0]));
   }
 
   Future<Uint8List> hf14a4ReaderApdu(Uint8List apdu) async {
-    return (await sendCmd(ChameleonCommand.hf14a4ReaderApdu,
-            data: Uint8List.fromList([...apdu]),
-            timeout: const Duration(seconds: 3)))!
-        .data;
+    if (apdu.length < 4 || apdu.length > 260) throw ArgumentError('APDU must be 4–260 bytes');
+    return _cpuCommand(ChameleonCommand.hf14a4ReaderApdu,
+        data: apdu, success: 0, timeout: const Duration(seconds: 45));
   }
 
   Future<Uint8List> hf14a4EmvScan() async {
-    return (await sendCmd(ChameleonCommand.hf14a4EmvScan,
-            timeout: const Duration(seconds: 10)))!
-        .data;
+    return _cpuCommand(ChameleonCommand.hf14a4EmvScan,
+        success: 0, timeout: const Duration(seconds: 60));
   }
+
+
 
   Future<bool> mf0GetMagicMode() async {
     return (await sendCmd(ChameleonCommand.mf0NtagGetUidMagicMode))!.data[0] ==

@@ -6,6 +6,7 @@ import 'package:chameleonultragui/gui/menu/dialogs/slot/settings.dart';
 import 'package:chameleonultragui/helpers/definitions.dart';
 import 'package:chameleonultragui/helpers/general.dart';
 import 'package:chameleonultragui/helpers/hf14a4_slot.dart';
+import 'package:chameleonultragui/helpers/iso14443_4.dart';
 import 'package:chameleonultragui/helpers/mifare_classic/general.dart';
 import 'package:chameleonultragui/helpers/mifare_ultralight/general.dart';
 import 'package:chameleonultragui/main.dart';
@@ -151,6 +152,7 @@ class SlotManagerPageState extends State<SlotManagerPage> {
       appState.changesMade();
       refreshSlot();
     } else if (card.tag == TagType.hf14a4) {
+      cpuRulesFromData(card.data);
       close(context, card.name);
       setUploadState(0);
       await appState.communicator!.setReaderDeviceMode(false);

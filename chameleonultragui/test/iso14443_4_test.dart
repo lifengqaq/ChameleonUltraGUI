@@ -1,0 +1,111 @@
+import 'dart:typed_data';
+import 'package:chameleonultragui/bridge/chameleon.dart';
+import 'package:chameleonultragui/helpers/definitions.dart';
+import 'package:chameleonultragui/helpers/iso14443_4.dart';
+import 'package:chameleonultragui/sharedprefsprovider.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:logger/logger.dart';
+
+class Device extends ChameleonCommunicator {
+  Device() : super(Logger(level: Level.off));
+  final calls = <(ChameleonCommand, Uint8List)>[];
+  final replies = <ChameleonMessage>[];
+  @override
+  Future<ChameleonMessage?> sendCmd(ChameleonCommand cmd, {Uint8List? data,
+      Duration timeout = const Duration(seconds: 5), bool skipReceive = false,
+      bool firstRun = false}) async {
+    calls.add((cmd, data ?? Uint8List(0)));
+    return replies.removeAt(0);
+  }
+  void reply(int status, List<int> data) => replies.add(ChameleonMessage(
+      command: 0, status: status, data: Uint8List.fromList(data)));
+}
+final identity = CardData(uid: cpuHex('04010203'), atqa: cpuHex('0400'),
+    sak: 0x20, ats: cpuHex('067580700200'));
+List<int> identityBytes() => [4, ...identity.uid, ...identity.atqa, 0x20, 6, ...identity.ats];
+void main() {
+  test('strict hex and full identity bounds', () {
+    expect(cpuHex('00 A4\n04'), [0,0xA4,4]);
+    for (final value in ['0', 'GG', '0x00']) {
+      expect(() => cpuHex(value), throwsFormatException);
+    }
+    final packed = Uint8List.fromList(identityBytes());
+    for (var length=0;length<packed.length;length++) {
+      expect(() => parseCpuIdentity(Uint8List.fromList(packed.take(length).toList())), throwsFormatException);
+    }
+    expect(parseCpuIdentity(packed).$1.uid, identity.uid);
+  });
+  test('profile and library JSON retain APDU pairs', () {
+    final pair = CpuApduPair(cpuHex('00A4'), cpuHex('9000'));
+    final card = cpuProfileFromJson(cpuProfileJson(identity, [pair]));
+    final restored = CardSave.fromJson(card.toJson());
+    expect(restored.tag, TagType.hf14a4);
+    expect(cpuRulesFromData(restored.data).first.response, [0x90,0]);
+    expect(() => cpuRulesFromData([cpuHex('00')]), throwsFormatException);
+  });
+  test('validate capacities and duplicate prefixes before upload', () {
+    expect(() => validateCpuRules([CpuApduPair(Uint8List(17), cpuHex('9000'))]), throwsFormatException);
+    expect(() => validateCpuRules([CpuApduPair(cpuHex('00'), Uint8List(261))]), throwsFormatException);
+    expect(() => validateCpuRules([for (var i=0;i<13;i++)
+      CpuApduPair(Uint8List.fromList([i]),cpuHex('9000'))]), throwsFormatException);
+    expect(() => validateCpuRules([for (var i=0;i<5;i++)
+      CpuApduPair(Uint8List.fromList([i]),Uint8List(254))]), throwsFormatException);
+    expect(() => validateCpuRules([for (var i=0;i<2;i++)
+      CpuApduPair(cpuHex('00A4'),cpuHex('9000'))]), throwsFormatException);
+  });
+  test('EMV parser supports little-endian responses longer than 255 bytes', () {
+    final packed = Uint8List.fromList([...identityBytes(),1,4,0,0xA4,4,0,
+      0,1,...List<int>.filled(254,0x55),0x90,0]);
+    final parsed = parseCpuEmvScan(packed);
+    expect(parsed.$2.single.response.length,256);
+    expect(parsed.$2.single.statusWord,0x9000);
+    final truncated = Uint8List.fromList(packed.take(packed.length-1).toList());
+    expect(() => parseCpuEmvScan(truncated), throwsFormatException);
+    expect(() => parseCpuEmvScan(Uint8List.fromList([...packed,0])), throwsFormatException);
+  });
+  test('61xx and read-only 6Cxx preserve status and data', () async {
+    final calls = <Uint8List>[];
+    final replies = [cpuHex('6C02'),cpuHex('AA6101'),cpuHex('BB9000')];
+    final result = await exchangeCpuApdu(cpuHex('00B0000000'), (command) async {
+      calls.add(command); return replies.removeAt(0);
+    });
+    expect(result, cpuHex('AABB9000'));
+    expect(calls[1],cpuHex('00B0000002'));
+    expect(calls[2],cpuHex('00C0000001'));
+  });
+  test('writes are not repeated for 6Cxx and procedure loops are bounded', () async {
+    var calls=0;
+    final result=await exchangeCpuApdu(cpuHex('00D6000000'), (command) async {
+      calls++;return cpuHex('6C01');
+    });
+    expect(calls,1);expect(result,cpuHex('6C01'));
+    calls=0;
+    await expectLater(exchangeCpuApdu(cpuHex('00B0000000'), (command) async {
+      calls++;return cpuHex('6101');
+    }),throwsStateError);
+    expect(calls,16);
+  });
+  test('bridge preserves the high byte of 256-byte static responses', () async {
+    final device=Device()..reply(0x68,[]);
+    await device.hf14a4AddStaticResponse(cpuHex('00A4'),Uint8List(256));
+    final payload=device.calls.single.$2;
+    expect(payload.sublist(0,5),[2,0,0xA4,1,0]);
+  });
+  test('bridge rejects firmware failures instead of returning debug bytes', () async {
+    final device=Device()..reply(1,[1,2]);
+    await expectLater(device.hf14a4ReaderApdu(cpuHex('00A40400')),throwsStateError);
+  });
+  test('static table read uses BE16 and returns all pairs', () async {
+    final device=Device()..reply(0x68,[1])..reply(0x68,[2,0,0xA4,0,2,0x90,0]);
+    final pairs=await device.hf14a4ReadStaticResponses();
+    expect(pairs.single.command,cpuHex('00A4'));
+    expect(pairs.single.response,cpuHex('9000'));
+  });
+  test('open and close session have explicit wire commands', () async {
+    final device=Device()..reply(0,identityBytes())..reply(0x68,[]);
+    expect((await device.hf14a4OpenSession()).uid,identity.uid);
+    await device.hf14a4CloseSession();
+    expect(device.calls.map((c)=>c.$1.value),[6007,6007]);
+    expect(device.calls[0].$2,[1]);expect(device.calls[1].$2,[0]);
+  });
+}
