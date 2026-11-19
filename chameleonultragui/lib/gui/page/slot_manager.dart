@@ -1,4 +1,3 @@
-import 'package:chameleonultragui/helpers/iso7816_fs.dart';
 import 'dart:typed_data';
 
 import 'package:chameleonultragui/gui/component/card_list.dart';
@@ -153,8 +152,7 @@ class SlotManagerPageState extends State<SlotManagerPage> {
       appState.changesMade();
       refreshSlot();
     } else if (card.tag == TagType.hf14a4) {
-      validateCpuCardForDevice(card);
-      final image = cpuFilesystemFromData(card.data);
+      final image = validateCpuCardForDevice(card);
       if (image == null) {
         cpuRulesFromData(card.data);
       } else if (!(await appState.communicator!.getDeviceCapabilities())

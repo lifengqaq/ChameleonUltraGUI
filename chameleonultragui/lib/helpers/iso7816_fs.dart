@@ -119,6 +119,12 @@ class CpuFileSystem {
       usesPinAuthentication && usesKeyAuthentication ||
       security?.pin.isNotEmpty == true && security?.key.isNotEmpty == true;
 
+  void requireSingleAuthentication() {
+    if (hasLegacyMixedAuthentication) {
+      throw const FormatException('CPU 文件系统只能使用一种认证方式。请在编辑数据中选择 PIN 或密钥。');
+    }
+  }
+
   CpuFileSystem withAuthentication(CpuSecurity value) {
     value.validate();
     final usePin = value.pin.isNotEmpty;
@@ -188,7 +194,10 @@ class CpuFileSystem {
       ) +
       (security == null ? 0 : 44);
 
-  Uint8List encode() => _encode(allowLegacyMixedAuthentication: false);
+  Uint8List encode() {
+    requireSingleAuthentication();
+    return _encode(allowLegacyMixedAuthentication: false);
+  }
 
   Uint8List _encode({required bool allowLegacyMixedAuthentication}) {
     if (nodes.isEmpty || nodes.length > 16)
@@ -372,12 +381,16 @@ class CpuFileSystem {
   ]);
 }
 
-Uint8List? cpuFilesystemFromData(List<Uint8List> data) {
+Uint8List? cpuFilesystemFromData(
+  List<Uint8List> data, {
+  bool requireSingleAuthentication = false,
+}) {
   if (data.length != 1 ||
       data.first.length < 4 ||
       !List.generate(4, (i) => data.first[i] == _magic[i]).every((v) => v))
     return null;
-  CpuFileSystem.decode(data.first);
+  final filesystem = CpuFileSystem.decode(data.first);
+  if (requireSingleAuthentication) filesystem.requireSingleAuthentication();
   return data.first;
 }
 
@@ -420,7 +433,7 @@ Future<void> writeCpuFilesystem(
   Uint8List image,
   CpuFilesystemExchange exchange,
 ) async {
-  CpuFileSystem.decode(image);
+  CpuFileSystem.decode(image).requireSingleAuthentication();
   if (image[4] == 2) {
     Uint8List capabilities;
     try {

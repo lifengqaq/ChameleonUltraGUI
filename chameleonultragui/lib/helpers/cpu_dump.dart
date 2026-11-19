@@ -380,65 +380,6 @@ class CpuDumpReader {
   }
 }
 
-/// EMV advertises record ranges through AFL, not a universal file identifier map.
-/// Preserve the distinction: synthetic device FIDs are never called source FIDs.
-List<CpuDumpTarget> cpuEmvReadTargets(List<CpuApduPair> capture) {
-  if (!_isPaymentAid(_selectedApplicationAid(capture) ?? '')) return [];
-  var aid = Uint8List(0);
-  final result = <CpuDumpTarget>[];
-  final seen = <String>{};
-  for (final pair in capture) {
-    if (pair.command.length >= 5 &&
-        pair.command[1] == 0xA4 &&
-        pair.command[2] == 4) {
-      final count = pair.command[4];
-      if (count >= 5 && count <= 16 && pair.command.length >= count + 5) {
-        final value = Uint8List.fromList(pair.command.sublist(5, 5 + count));
-        aid = _hex(value) == _ppseHex ? Uint8List(0) : value;
-      }
-    }
-    if (aid.isEmpty ||
-        pair.command.length < 2 ||
-        pair.command[1] != 0xA8 ||
-        pair.statusWord != 0x9000)
-      continue;
-    final data = Uint8List.fromList(
-      pair.response.sublist(0, pair.response.length - 2),
-    );
-    final fields = cpuFindTlv(data, 0x94);
-    var afl = fields.isEmpty ? Uint8List(0) : fields.first;
-    if (afl.isEmpty) {
-      final format1 = cpuFindTlv(data, 0x80);
-      if (format1.isNotEmpty && format1.first.length >= 2)
-        afl = Uint8List.fromList(format1.first.sublist(2));
-    }
-    if (afl.length % 4 != 0 || afl.length > 252) continue;
-    for (var p = 0; p < afl.length; p += 4) {
-      final sfi = afl[p] >> 3, first = afl[p + 1], last = afl[p + 2];
-      if (afl[p] & 7 != 0 ||
-          sfi < 1 ||
-          sfi > 30 ||
-          first < 1 ||
-          last < first ||
-          last > 254)
-        continue;
-      final key = '${_hex(aid)}:$sfi:$first:$last';
-      if (seen.add(key))
-        result.add(
-          CpuDumpTarget(
-            [],
-            aid: aid,
-            type: 2,
-            sfi: sfi,
-            firstRecord: first,
-            lastRecord: last,
-          ),
-        );
-    }
-  }
-  return result;
-}
-
 enum CpuEmvReadPlanIssue {
   none,
   noResponses,
@@ -460,116 +401,111 @@ const _paymentAidPrefixes = [
   'A000000333', // UnionPay / PBOC
 ];
 
-String? _selectedApplicationAid(List<CpuApduPair> capture) {
-  String? aid;
-  for (final pair in capture) {
-    final command = pair.command;
-    if (command.length >= 5 &&
-        command[1] == 0xA4 &&
-        command[2] == 4 &&
-        command[4] >= 5 &&
-        command.length >= command[4] + 5) {
-      final selected = _hex(command.sublist(5, 5 + command[4]));
-      aid = selected == _ppseHex || pair.statusWord != 0x9000 ? null : selected;
-    }
+Uint8List? _selectedName(Uint8List command) {
+  if (command.length < 5 || command[1] != 0xA4 || command[2] != 4) {
+    return null;
   }
-  return aid;
+  final length = command[4];
+  if (length < 5 || length > 16 || command.length < length + 5) return null;
+  return command.sublist(5, 5 + length);
 }
 
-bool _isPaymentAid(String aid) => _paymentAidPrefixes.any(aid.startsWith);
+bool _isGpo(Uint8List command) =>
+    command.length >= 5 &&
+    command[0] == 0x80 &&
+    command[1] == 0xA8 &&
+    command[2] == 0 &&
+    command[3] == 0;
 
-bool cpuCaptureLooksLikeEmv(List<CpuApduPair> capture) {
-  var directorySelected = false;
-  var gpoSeen = false;
-  for (final pair in capture) {
-    final command = pair.command;
-    if (command.length >= 5 &&
-        command[1] == 0xA4 &&
-        command[2] == 4 &&
-        command[4] >= 5 &&
-        command.length >= command[4] + 5) {
-      final aid = _hex(command.sublist(5, 5 + command[4]));
-      if (aid == _ppseHex) directorySelected = true;
-    }
-    if (command.length >= 2 && command[1] == 0xA8) gpoSeen = true;
-  }
-  final aid = _selectedApplicationAid(capture);
-  return directorySelected || (_isPaymentAid(aid ?? '') && gpoSeen);
-}
+/// Build a plan only from GPO responses tied to a successful payment AID
+/// selection. A failed directory SELECT alone does not classify the card.
+({
+  List<CpuDumpTarget> targets,
+  CpuEmvReadPlanIssue issue,
+  int? failedStatus,
+  bool hasEmvFlow,
+})
+analyzeCpuEmvReadPlan(List<CpuApduPair> capture) {
+  var issue = capture.isEmpty
+      ? CpuEmvReadPlanIssue.noResponses
+      : CpuEmvReadPlanIssue.applicationNotSelected;
+  var hasEmvFlow = false;
+  Uint8List? selectedAid;
+  int? failedStatus;
+  final targets = <CpuDumpTarget>[];
+  final seen = <String>{};
 
-CpuEmvReadPlanIssue cpuEmvReadPlanIssue(List<CpuApduPair> capture) {
-  if (capture.isEmpty) return CpuEmvReadPlanIssue.noResponses;
-  var directorySelectionAttempted = false;
-  var directorySelectionSucceeded = false;
-  var applicationSelectionAttempted = false;
-  var applicationSelectionSucceeded = false;
-  var gpoAttempted = false;
-  var gpoSucceeded = false;
   for (final pair in capture) {
-    final command = pair.command;
-    if (command.length >= 5 &&
-        command[1] == 0xA4 &&
-        command[2] == 4 &&
-        command[4] >= 5 &&
-        command.length >= command[4] + 5) {
-      final aid = _hex(command.sublist(5, 5 + command[4]));
-      if (aid == _ppseHex) {
-        directorySelectionAttempted = true;
-        directorySelectionSucceeded = pair.statusWord == 0x9000;
+    final selection = _selectedName(pair.command);
+    if (selection != null) {
+      final name = _hex(selection);
+      final status = pair.statusWord;
+      selectedAid = null;
+      failedStatus = null;
+      if (name == _ppseHex && status != 0x9000) {
+        issue = CpuEmvReadPlanIssue.directorySelectionFailed;
+        failedStatus = status;
+      } else if (_paymentAidPrefixes.any(name.startsWith)) {
+        if (status == 0x9000) {
+          selectedAid = selection;
+          issue = CpuEmvReadPlanIssue.gpoNotAttempted;
+        } else {
+          issue = CpuEmvReadPlanIssue.applicationSelectionFailed;
+          failedStatus = status;
+        }
       } else {
-        applicationSelectionAttempted = _isPaymentAid(aid);
-        applicationSelectionSucceeded =
-            applicationSelectionAttempted && pair.statusWord == 0x9000;
+        issue = CpuEmvReadPlanIssue.applicationNotSelected;
+      }
+      continue;
+    }
+    final aid = selectedAid;
+    if (aid == null || !_isGpo(pair.command)) continue;
+    hasEmvFlow = true;
+    final status = pair.statusWord;
+    if (status != 0x9000) {
+      issue = CpuEmvReadPlanIssue.gpoFailed;
+      failedStatus = status;
+      continue;
+    }
+
+    issue = CpuEmvReadPlanIssue.noUsableAfl;
+    failedStatus = null;
+    final data = pair.response.sublist(0, pair.response.length - 2);
+    final format2 = cpuFindTlv(data, 0x94);
+    final format1 = format2.isEmpty ? cpuFindTlv(data, 0x80) : <Uint8List>[];
+    final afl = format2.isNotEmpty
+        ? format2.first
+        : format1.isNotEmpty && format1.first.length >= 2
+        ? format1.first.sublist(2)
+        : Uint8List(0);
+    if (afl.length % 4 != 0 || afl.length > 252) continue;
+    for (var offset = 0; offset < afl.length; offset += 4) {
+      final sfi = afl[offset] >> 3;
+      final first = afl[offset + 1];
+      final last = afl[offset + 2];
+      if (afl[offset] & 7 != 0 ||
+          sfi < 1 || sfi > 30 || first < 1 || last < first || last > 254) {
+        continue;
+      }
+      if (seen.add('${_hex(aid)}:$sfi:$first:$last')) {
+        targets.add(CpuDumpTarget(
+          [],
+          aid: aid,
+          type: 2,
+          sfi: sfi,
+          firstRecord: first,
+          lastRecord: last,
+        ));
       }
     }
-    if (command.length >= 2 && command[1] == 0xA8) {
-      gpoAttempted = true;
-      gpoSucceeded = pair.statusWord == 0x9000;
-    }
   }
-  if (!applicationSelectionSucceeded ||
-      !_isPaymentAid(_selectedApplicationAid(capture) ?? '')) {
-    if (applicationSelectionAttempted) {
-      return CpuEmvReadPlanIssue.applicationSelectionFailed;
-    }
-    if (directorySelectionAttempted && !directorySelectionSucceeded) {
-      return CpuEmvReadPlanIssue.directorySelectionFailed;
-    }
-    return CpuEmvReadPlanIssue.applicationNotSelected;
-  }
-  if (!gpoAttempted) return CpuEmvReadPlanIssue.gpoNotAttempted;
-  if (!gpoSucceeded) return CpuEmvReadPlanIssue.gpoFailed;
-  return cpuEmvReadTargets(capture).isEmpty
-      ? CpuEmvReadPlanIssue.noUsableAfl
-      : CpuEmvReadPlanIssue.none;
+  return (
+    targets: targets,
+    issue: targets.isEmpty ? issue : CpuEmvReadPlanIssue.none,
+    failedStatus: targets.isEmpty ? failedStatus : null,
+    hasEmvFlow: hasEmvFlow,
+  );
 }
 
-int? cpuEmvReadPlanFailureStatus(
-  List<CpuApduPair> capture,
-  CpuEmvReadPlanIssue issue,
-) {
-  final instruction = switch (issue) {
-    CpuEmvReadPlanIssue.directorySelectionFailed => 0xA4,
-    CpuEmvReadPlanIssue.applicationSelectionFailed => 0xA4,
-    CpuEmvReadPlanIssue.gpoFailed => 0xA8,
-    _ => null,
-  };
-  if (instruction == null) return null;
-  for (final pair in capture.reversed) {
-    final command = pair.command;
-    if (command.length < 5 || command[1] != instruction) continue;
-    if (instruction == 0xA4 && command[2] != 4) continue;
-    if (instruction == 0xA4 && command[4] < 5) continue;
-    if (instruction == 0xA4 && command.length < command[4] + 5) continue;
-    if (issue == CpuEmvReadPlanIssue.directorySelectionFailed &&
-        _hex(command.sublist(5, 5 + command[4])) != _ppseHex)
-      continue;
-    if (issue == CpuEmvReadPlanIssue.applicationSelectionFailed &&
-        !_isPaymentAid(
-          _hex(command.sublist(5, 5 + command[4])),
-        ))
-      continue;
-    if (pair.statusWord != 0x9000) return pair.statusWord;
-  }
-  return null;
-}
+List<CpuDumpTarget> cpuEmvReadTargets(List<CpuApduPair> capture) =>
+    analyzeCpuEmvReadPlan(capture).targets;

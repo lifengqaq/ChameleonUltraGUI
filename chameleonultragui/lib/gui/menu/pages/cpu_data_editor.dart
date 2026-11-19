@@ -139,7 +139,7 @@ class _CpuDataEditorState extends State<CpuDataEditor> {
                           context: context,
                           builder: (context) => AlertDialog(
                             title: Text(l.cpu_security_title),
-                            content: Text(l.cpu_security_mixed_warning),
+                                content: Text(l.cpu_security_change_method),
                             actions: [
                               TextButton(
                                 onPressed: () => Navigator.pop(context, false),

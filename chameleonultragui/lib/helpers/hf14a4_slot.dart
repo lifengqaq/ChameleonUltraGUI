@@ -12,13 +12,7 @@ Future<void> writeHf14a4SlotIdentity(
   ChameleonCommunicator communicator,
   CardSave card,
 ) async {
-  validateCpuCardForDevice(card);
-  final rawImage = card.tag == TagType.hf14a4
-      ? cpuFilesystemFromData(card.data)
-      : null;
-  final image = rawImage == null
-      ? null
-      : CpuFileSystem.decode(rawImage).encode();
+  final image = validateCpuCardForDevice(card);
   final pairs = card.tag == TagType.hf14a4 && image == null
       ? cpuRulesFromData(card.data)
       : <CpuApduPair>[];
@@ -95,9 +89,11 @@ Future<void> prepareHf14a4Slot(
   }
 }
 
-void validateCpuCardForDevice(CardSave card) {
-  if (card.tag == TagType.hf14a4 &&
-      card.extraData.cpuDump['archiveOnly'] == true) {
+/// Validate before the caller changes the active slot or its contents.
+Uint8List? validateCpuCardForDevice(CardSave card) {
+  if (card.tag != TagType.hf14a4) return null;
+  if (card.extraData.cpuDump['archiveOnly'] == true) {
     throw StateError('此卡是归档转储，无法作为 UID-only 卡上传。请在编辑数据中明确创建可容纳的模拟文件。');
   }
+  return cpuFilesystemFromData(card.data, requireSingleAuthentication: true);
 }

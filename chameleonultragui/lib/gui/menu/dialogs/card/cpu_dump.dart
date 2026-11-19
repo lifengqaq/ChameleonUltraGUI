@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:chameleonultragui/connector/serial_abstract.dart';
 import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
 import 'package:chameleonultragui/gui/menu/dialogs/card/cpu_auth.dart';
+import 'package:chameleonultragui/gui/menu/tools/cpu_emv_summary.dart';
 import 'package:chameleonultragui/helpers/cpu_auth.dart';
 import 'package:chameleonultragui/helpers/cpu_dump.dart';
 import 'package:chameleonultragui/helpers/definitions.dart';
@@ -55,7 +56,7 @@ class _CpuDumpDialogState extends State<CpuDumpDialog> {
           ? 'CPU ${bytesToHexSpace(widget.identity.uid)}'
           : widget.name,
     );
-    if (cpuCaptureLooksLikeEmv(widget.capture)) _family = 'emv';
+    if (analyzeCpuEmvReadPlan(widget.capture).hasEmvFlow) _family = 'emv';
   }
 
   @override
@@ -123,59 +124,67 @@ class _CpuDumpDialogState extends State<CpuDumpDialog> {
           capture.addAll(scanned.$2);
         }
         if (capture.isEmpty) {
+          if (!mounted) return;
           setState(() => _error = l.cpu_dump_emv_no_responses);
           return;
         }
-        targets = cpuEmvReadTargets(capture);
       }
-      final identity = await device.hf14a4OpenSession();
-      sessionOpen = true;
-      if (!listEquals(identity.uid, widget.identity.uid))
-        throw StateError(l.cpu_dump_card_changed);
-      final history = cpuAuthHistoryForCard(identity.uid, identity.ats);
-      final reader = CpuDumpReader(
-        exchange: device.hf14a4ReaderApdu,
-        authenticate: () async {
-          if (!mounted) return false;
-          return showCpuAuthentication(
-            context,
-            exchange: device.hf14a4ReaderApdu,
-            history: history,
-            initial: _family == 'emv'
-                ? const CpuAuthSettings(
-                    reference: 0x80,
-                    pinEncoding: CpuPinEncoding.iso9564,
-                  )
-                : const CpuAuthSettings(),
-          );
-        },
-      );
-      final result = targets.isEmpty
-          ? CpuDumpResult()
-          : await reader.read(targets);
-      if (_family == 'emv' && targets.isEmpty) {
-        result.failures.add({'reason': cpuEmvReadPlanIssue(capture).name});
-      }
-      if (sessionOpen) {
+      final emvPlan = _family == 'emv' ? analyzeCpuEmvReadPlan(capture) : null;
+      if (emvPlan != null) targets = emvPlan.targets;
+      late final CpuDumpResult result;
+      if (targets.isNotEmpty) {
+        final identity = await device.hf14a4OpenSession();
+        sessionOpen = true;
+        if (!listEquals(identity.uid, widget.identity.uid)) {
+          throw StateError(l.cpu_dump_card_changed);
+        }
+        final history = cpuAuthHistoryForCard(identity.uid, identity.ats);
+        final reader = CpuDumpReader(
+          exchange: device.hf14a4ReaderApdu,
+          authenticate: () async {
+            if (!mounted) return false;
+            return showCpuAuthentication(
+              context,
+              exchange: device.hf14a4ReaderApdu,
+              history: history,
+              initial: emvPlan == null
+                  ? const CpuAuthSettings()
+                  : const CpuAuthSettings(
+                      reference: 0x80,
+                      pinEncoding: CpuPinEncoding.iso9564,
+                    ),
+            );
+          },
+        );
+        result = await reader.read(targets);
         await device.hf14a4CloseSession();
         sessionOpen = false;
+      } else {
+        result = CpuDumpResult();
+        if (emvPlan != null) {
+          result.failures.add({
+            'reason': emvPlan.issue.name,
+            if (emvPlan.failedStatus != null) 'status': emvPlan.failedStatus,
+          });
+        }
       }
       if (!mounted) return;
       if (result.files.isEmpty && capture.isEmpty) {
-        setState(() => _error = l.cpu_dump_no_files);
+        final failures = result.failures.where((f) => f['path'] != null);
+        setState(() => _error = failures.isEmpty
+            ? l.cpu_dump_no_files
+            : _targetFailureText(l, failures.first));
         return;
       }
       final filesystem = result.deviceFilesystem();
       final dump = result.toJson();
       dump['archiveOnly'] = filesystem == null;
       dump['application'] = _family;
-      if (_family == 'emv') {
-        final issue = cpuEmvReadPlanIssue(capture);
-        dump['emvReadPlanIssue'] = issue.name;
-        dump['emvFailedStatusWord'] = cpuEmvReadPlanFailureStatus(
-          capture,
-          issue,
-        );
+      if (emvPlan != null) {
+        dump['emvReadPlanIssue'] = emvPlan.issue.name;
+        if (emvPlan.failedStatus != null) {
+          dump['emvFailedStatusWord'] = emvPlan.failedStatus;
+        }
       }
       dump['capturedResponses'] = [
         for (final p in capture)
@@ -207,34 +216,9 @@ class _CpuDumpDialogState extends State<CpuDumpDialog> {
                   Text(l.cpu_dump_protection_help),
                 if (filesystem == null) Text(l.cpu_dump_archive_only),
                 for (final failure in result.failures)
-                  if (failure['reason'] != null)
-                    Builder(
-                      builder: (context) {
-                        if (failure['reason'] == 'read_limit_reached') {
-                          return Text(l.cpu_dump_read_limit);
-                        }
-                        final issue = CpuEmvReadPlanIssue.values.firstWhere(
-                          (value) => value.name == failure['reason'],
-                          orElse: () => CpuEmvReadPlanIssue.noResponses,
-                        );
-                        final status = cpuEmvReadPlanFailureStatus(
-                          capture,
-                          issue,
-                        );
-                        return Text(
-                          '${_emvFailureText(l, issue.name)}'
-                          '${status == null ? '' : ' · SW ${status.toRadixString(16).padLeft(4, '0').toUpperCase()}'}',
-                        );
-                      },
-                    ),
-                for (final failure in result.failures)
-                  if (failure['path'] != null)
-                    Text(
-                      l.cpu_dump_target_failed(
-                        failure['path'].toString(),
-                        _formatStatusWord(failure['status'] as int),
-                      ),
-                    ),
+                  Text(failure['path'] != null
+                      ? _targetFailureText(l, failure)
+                      : _planFailureText(l, failure)),
               ],
             ),
           ),
@@ -256,7 +240,7 @@ class _CpuDumpDialogState extends State<CpuDumpDialog> {
           _card(filesystem == null ? [] : [filesystem.encode()], dump),
         );
     } on CpuCommandError catch (error) {
-      if (mounted) setState(() => _error = 'SW/Device ${error.toString()}');
+      if (mounted) setState(() => _error = cpuCommandErrorText(l, error));
     } on StateError catch (error) {
       if (mounted) setState(() => _error = error.message.toString());
     } catch (_) {
@@ -271,17 +255,27 @@ class _CpuDumpDialogState extends State<CpuDumpDialog> {
     }
   }
 
-  String _emvFailureText(AppLocalizations l, String reason) => switch (reason) {
-    'noResponses' => l.cpu_dump_emv_no_responses,
-    'directorySelectionFailed' => l.cpu_dump_emv_directory_failed,
-    'applicationNotSelected' => l.cpu_dump_emv_application_missing,
-    'applicationSelectionFailed' => l.cpu_dump_emv_application_failed,
-    'gpoNotAttempted' => l.cpu_dump_emv_gpo_missing,
-    'gpoFailed' => l.cpu_dump_emv_gpo_failed,
-    'noUsableAfl' => l.cpu_dump_emv_no_afl,
-    'read_limit_reached' => l.cpu_dump_read_limit,
-    _ => l.cpu_dump_emv_unknown,
-  };
+  String _planFailureText(AppLocalizations l, Map<String, dynamic> failure) {
+    final message = switch (failure['reason']) {
+      'noResponses' => l.cpu_dump_emv_no_responses,
+      'directorySelectionFailed' => l.cpu_dump_emv_directory_failed,
+      'applicationNotSelected' => l.cpu_dump_emv_application_missing,
+      'applicationSelectionFailed' => l.cpu_dump_emv_application_failed,
+      'gpoNotAttempted' => l.cpu_dump_emv_gpo_missing,
+      'gpoFailed' => l.cpu_dump_emv_gpo_failed,
+      'noUsableAfl' => l.cpu_dump_emv_no_afl,
+      'read_limit_reached' => l.cpu_dump_read_limit,
+      _ => l.cpu_dump_emv_unknown,
+    };
+    final status = failure['status'];
+    return status is int ? '$message · SW ${_formatStatusWord(status)}' : message;
+  }
+
+  String _targetFailureText(AppLocalizations l, Map<String, dynamic> failure) =>
+      l.cpu_dump_target_failed(
+        failure['path'].toString(),
+        _formatStatusWord(failure['status'] as int),
+      );
 
   String _formatStatusWord(int value) =>
       value.toRadixString(16).padLeft(4, '0').toUpperCase();

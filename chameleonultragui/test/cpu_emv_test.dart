@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
 import 'package:chameleonultragui/gui/menu/tools/cpu_card.dart';
 import 'package:chameleonultragui/gui/menu/tools/cpu_emv_summary.dart';
+import 'package:chameleonultragui/helpers/cpu_dump.dart';
 import 'package:chameleonultragui/helpers/cpu_emv.dart';
 import 'package:chameleonultragui/helpers/iso14443_4.dart';
 import 'package:chameleonultragui/main.dart';
@@ -114,13 +115,31 @@ void main() {
       final ordinary = [
         CpuApduPair(cpuHex('00B0000004'), cpuHex('010203049000')),
       ];
-      expect(cpuCaptureLooksLikeEmv(ordinary), isFalse);
-      expect(cpuCaptureLooksLikeEmv(_sample()), isTrue);
-      expect(cpuEmvReadPlanIssue(_sample()), CpuEmvReadPlanIssue.noUsableAfl);
+      expect(analyzeCpuEmvReadPlan(ordinary).hasEmvFlow, isFalse);
+      final plan = analyzeCpuEmvReadPlan(_sample());
+      expect(plan.hasEmvFlow, isTrue);
+      expect(plan.issue, CpuEmvReadPlanIssue.noUsableAfl);
+      expect(plan.targets, isEmpty);
       expect(
-        cpuEmvReadPlanIssue(ordinary),
+        analyzeCpuEmvReadPlan(ordinary).issue,
         CpuEmvReadPlanIssue.applicationNotSelected,
       );
+      final failedDirectory = analyzeCpuEmvReadPlan([
+        CpuApduPair(_sample().first.command, cpuHex('6A82')),
+      ]);
+      expect(failedDirectory.hasEmvFlow, isFalse);
+      expect(failedDirectory.issue, CpuEmvReadPlanIssue.directorySelectionFailed);
+      expect(failedDirectory.failedStatus, 0x6A82);
+
+      final capture = _sample();
+      final failedGpo = analyzeCpuEmvReadPlan([
+        capture[0],
+        capture[1],
+        CpuApduPair(capture[2].command, cpuHex('6985')),
+      ]);
+      expect(failedGpo.issue, CpuEmvReadPlanIssue.gpoFailed);
+      expect(failedGpo.failedStatus, 0x6985);
+      expect(failedGpo.targets, isEmpty);
     },
   );
 

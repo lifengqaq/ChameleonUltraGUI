@@ -151,7 +151,7 @@ void main() {
     },
   );
 
-  test('legacy mixed PIN/key profiles load for review but require explicit conversion', () {
+  test('legacy mixed PIN/key profiles load for review but require explicit conversion', () async {
     final initial = CpuFileSystem([
       CpuFileNode(parent: 255, type: 0, fid: 0x3F00),
       CpuFileNode(parent: 0, type: 1, fid: 0x1001, access: 5),
@@ -159,7 +159,7 @@ void main() {
     ], security: CpuSecurity(pin: '000000'));
     final legacy = initial.encode();
     final securityOffset = legacy.length - 44;
-    legacy[39] = 34; // the second EF retains PIN read and gains key write
+    legacy[39] = 34; // The second EF now requires a key for updates.
     legacy[securityOffset + 7] = 3;
     legacy[securityOffset + 9] = 3;
     legacy[securityOffset + 11] = 8;
@@ -173,6 +173,9 @@ void main() {
     expect(decoded.nodes[1].access, 5);
     expect(decoded.nodes[2].access, 34);
     expect(() => decoded.encode(), throwsFormatException);
+    final device = _Device();
+    await expectLater(writeCpuFilesystem(legacy, device.exchange), throwsFormatException);
+    expect(device.calls, isEmpty);
 
     final asPin = decoded.withAuthentication(CpuSecurity(pin: '123456'));
     expect(asPin.hasLegacyMixedAuthentication, isFalse);
