@@ -261,8 +261,7 @@ class ChameleonCommunicator {
       int atsLength = resp.data[uidLength + 4];
       return CardData(
         uid: resp.data.sublist(1, uidLength + 1),
-        atqa: Uint8List.fromList(
-            resp.data.sublist(uidLength + 1, uidLength + 3).reversed.toList()),
+        atqa: cpuAtqaFromWire(resp.data.sublist(uidLength + 1, uidLength + 3)),
         sak: resp.data[uidLength + 3],
         ats: resp.data.sublist(uidLength + 5, uidLength + 5 + atsLength),
       );
@@ -611,7 +610,7 @@ class ChameleonCommunicator {
         data: Uint8List.fromList([
           card.uid.length,
           ...card.uid,
-          ...card.atqa.reversed,
+          ...cpuAtqaToWire(card.atqa),
           card.sak,
           card.ats.length,
           ...card.ats
@@ -1173,8 +1172,7 @@ class ChameleonCommunicator {
     int atsLength = resp.data[uidLength + 4];
     return CardData(
       uid: resp.data.sublist(1, uidLength + 1),
-      atqa: Uint8List.fromList(
-          resp.data.sublist(uidLength + 1, uidLength + 3).reversed.toList()),
+      atqa: cpuAtqaFromWire(resp.data.sublist(uidLength + 1, uidLength + 3)),
       sak: resp.data[uidLength + 3],
       ats: resp.data.sublist(uidLength + 5, uidLength + 5 + atsLength),
     );
@@ -1421,10 +1419,8 @@ class ChameleonCommunicator {
         int atsLength = resp.data[offset + uidLength + 4];
         cards.add(CardData(
           uid: resp.data.sublist(offset + 1, offset + uidLength + 1),
-          atqa: Uint8List.fromList(resp.data
-              .sublist(offset + uidLength + 1, offset + uidLength + 3)
-              .reversed
-              .toList()),
+          atqa: cpuAtqaFromWire(resp.data
+              .sublist(offset + uidLength + 1, offset + uidLength + 3)),
           sak: resp.data[offset + uidLength + 3],
           ats: resp.data.sublist(
               offset + uidLength + 5, offset + uidLength + 5 + atsLength),
@@ -1553,7 +1549,9 @@ class ChameleonCommunicator {
         sak < 0 || sak > 255 || ats.length > 255) {
       throw ArgumentError('Invalid ISO-DEP identity');
     }
-    final payload = Uint8List.fromList([uid.length, ...uid, ...atqa, sak, ats.length, ...ats]);
+    final payload = Uint8List.fromList([
+      uid.length, ...uid, ...cpuAtqaToWire(atqa), sak, ats.length, ...ats,
+    ]);
     parseCpuIdentity(payload);
     await _cpuCommand(ChameleonCommand.hf14a4SetAntiColl, data: payload);
   }

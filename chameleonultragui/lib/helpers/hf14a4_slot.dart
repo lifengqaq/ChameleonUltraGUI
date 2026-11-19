@@ -1,4 +1,5 @@
 import 'package:chameleonultragui/helpers/iso7816_fs.dart';
+
 import 'dart:typed_data';
 
 import 'package:chameleonultragui/helpers/iso14443_4.dart';
@@ -12,13 +13,21 @@ Future<void> writeHf14a4SlotIdentity(
   CardSave card,
 ) async {
   validateCpuCardForDevice(card);
-  final image = card.tag == TagType.hf14a4 ? cpuFilesystemFromData(card.data) : null;
+  final rawImage = card.tag == TagType.hf14a4
+      ? cpuFilesystemFromData(card.data)
+      : null;
+  final image = rawImage == null
+      ? null
+      : CpuFileSystem.decode(rawImage).encode();
   final pairs = card.tag == TagType.hf14a4 && image == null
-      ? cpuRulesFromData(card.data) : <CpuApduPair>[];
+      ? cpuRulesFromData(card.data)
+      : <CpuApduPair>[];
   final commands = card.tag == TagType.hf14a4
-      ? await communicator.getDeviceCapabilities() : <int>[];
+      ? await communicator.getDeviceCapabilities()
+      : <int>[];
   final supported = commands.contains(ChameleonCommand.hf14a4StaticRead.value);
-  if (image != null && !commands.contains(ChameleonCommand.hf14a4Filesystem.value)) {
+  if (image != null &&
+      !commands.contains(ChameleonCommand.hf14a4Filesystem.value)) {
     throw StateError('请先升级配套固件：当前设备缺少 CPU 文件系统命令 6009');
   }
   if (pairs.isNotEmpty && !supported) {
@@ -51,9 +60,13 @@ Future<CardSave> readHf14a4SlotIdentity(
 
   final commands = await communicator.getDeviceCapabilities();
   final image = commands.contains(ChameleonCommand.hf14a4Filesystem.value)
-      ? await communicator.hf14a4ReadFilesystem() : null;
-  final pairs = image == null && commands.contains(ChameleonCommand.hf14a4StaticRead.value)
-      ? await communicator.hf14a4ReadStaticResponses() : <CpuApduPair>[];
+      ? await communicator.hf14a4ReadFilesystem()
+      : null;
+  final pairs =
+      image == null &&
+          commands.contains(ChameleonCommand.hf14a4StaticRead.value)
+      ? await communicator.hf14a4ReadStaticResponses()
+      : <CpuApduPair>[];
   return CardSave(
     uid: bytesToHexSpace(data.uid),
     name: name,
@@ -68,20 +81,23 @@ Future<CardSave> readHf14a4SlotIdentity(
   );
 }
 
-
 /// Preserve an existing CPU slot until the staged filesystem has committed.
-Future<void> prepareHf14a4Slot(ChameleonCommunicator communicator, int slot) async {
-  if (slot < 0 || slot > 7) throw RangeError.range(slot,0,7,'slot');
+Future<void> prepareHf14a4Slot(
+  ChameleonCommunicator communicator,
+  int slot,
+) async {
+  if (slot < 0 || slot > 7) throw RangeError.range(slot, 0, 7, 'slot');
   final types = await communicator.getSlotTagTypes();
   if (types.length <= slot) throw const FormatException('设备返回的卡槽列表不完整');
   if (types[slot].hf != TagType.hf14a4) {
-    await communicator.setSlotType(slot,TagType.hf14a4);
-    await communicator.setDefaultDataToSlot(slot,TagType.hf14a4);
+    await communicator.setSlotType(slot, TagType.hf14a4);
+    await communicator.setDefaultDataToSlot(slot, TagType.hf14a4);
   }
 }
 
 void validateCpuCardForDevice(CardSave card) {
-  if (card.tag == TagType.hf14a4 && card.extraData.cpuDump['archiveOnly'] == true) {
+  if (card.tag == TagType.hf14a4 &&
+      card.extraData.cpuDump['archiveOnly'] == true) {
     throw StateError('此卡是归档转储，无法作为 UID-only 卡上传。请在编辑数据中明确创建可容纳的模拟文件。');
   }
 }

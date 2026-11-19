@@ -1,4 +1,5 @@
 import 'package:chameleonultragui/helpers/definitions.dart';
+
 import 'dart:typed_data';
 
 import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
@@ -21,9 +22,8 @@ List<int> _tlv(int tag, List<int> value) => [
   value.length,
   ...value,
 ];
-CpuApduPair _pair(String command, List<int> response) => CpuApduPair(
-  cpuHex(command), Uint8List.fromList([...response, 0x90, 0]),
-);
+CpuApduPair _pair(String command, List<int> response) =>
+    CpuApduPair(cpuHex(command), Uint8List.fromList([...response, 0x90, 0]));
 List<int> _directoryResponse() {
   final application = [
     ..._tlv(0x4F, cpuHex('A000000333010101')),
@@ -31,20 +31,33 @@ List<int> _directoryResponse() {
   ];
   return _tlv(0x6F, _tlv(0xA5, _tlv(0xBF0C, _tlv(0x61, application))));
 }
+
 List<CpuApduPair> _sample() => [
   _pair('00A404000E325041592E5359532E444446303100', _directoryResponse()),
-  _pair('00A4040008A00000033301010100', _tlv(0x6F, [
-    ..._tlv(0x84, cpuHex('A000000333010101')),
-    ..._tlv(0xA5, _tlv(0x50, 'PBOC DEBIT'.codeUnits)),
-  ])),
-  _pair('80A8000002830000', _tlv(0x77, [
-    ..._tlv(0x82, [0x7C, 0]),
-    ..._tlv(0x9F36, [0, 0x4C]),
-    ..._tlv(0x57, cpuHex('6212340000000001234D3012220' '00000000000')),
-    ..._tlv(0x9F26, List.filled(8, 0)),
-    ..._tlv(0x9F27, [0x80]),
-    ..._tlv(0x5F20, List.filled(26, 0x20)),
-  ])),
+  _pair(
+    '00A4040008A00000033301010100',
+    _tlv(0x6F, [
+      ..._tlv(0x84, cpuHex('A000000333010101')),
+      ..._tlv(0xA5, _tlv(0x50, 'PBOC DEBIT'.codeUnits)),
+    ]),
+  ),
+  _pair(
+    '80A8000002830000',
+    _tlv(0x77, [
+      ..._tlv(0x82, [0x7C, 0]),
+      ..._tlv(0x9F36, [0, 0x4C]),
+      ..._tlv(
+        0x57,
+        cpuHex(
+          '6212340000000001234D3012220'
+          '00000000000',
+        ),
+      ),
+      ..._tlv(0x9F26, List.filled(8, 0)),
+      ..._tlv(0x9F27, [0x80]),
+      ..._tlv(0x5F20, List.filled(26, 0x20)),
+    ]),
+  ),
 ];
 
 Widget _app(Widget child, {Locale locale = const Locale('en')}) => MaterialApp(
@@ -56,9 +69,19 @@ Widget _app(Widget child, {Locale locale = const Locale('en')}) => MaterialApp(
 
 void main() {
   testWidgets('RF status uses an actionable localized message', (tester) async {
-    await tester.pumpWidget(_app(Builder(builder: (context) => Text(
-      cpuCommandErrorText(AppLocalizations.of(context)!, CpuCommandError(6005, 1)),
-    )), locale: const Locale('zh')));
+    await tester.pumpWidget(
+      _app(
+        Builder(
+          builder: (context) => Text(
+            cpuCommandErrorText(
+              AppLocalizations.of(context)!,
+              CpuCommandError(6005, 1),
+            ),
+          ),
+        ),
+        locale: const Locale('zh'),
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.text('未检测到卡片。请贴紧 Ultra 高频天线后重试。'), findsOneWidget);
     expect(find.textContaining('Bad state'), findsNothing);
@@ -79,9 +102,27 @@ void main() {
     expect(result.hasCardError, isFalse);
     expect(result.hasMalformedData, isFalse);
     expect(result.steps.map((step) => step.kind), [
-      CpuEmvStepKind.directory, CpuEmvStepKind.application, CpuEmvStepKind.processing,
+      CpuEmvStepKind.directory,
+      CpuEmvStepKind.application,
+      CpuEmvStepKind.processing,
     ]);
   });
+
+  test(
+    'EMV capture classification requires a selected application and GPO',
+    () {
+      final ordinary = [
+        CpuApduPair(cpuHex('00B0000004'), cpuHex('010203049000')),
+      ];
+      expect(cpuCaptureLooksLikeEmv(ordinary), isFalse);
+      expect(cpuCaptureLooksLikeEmv(_sample()), isTrue);
+      expect(cpuEmvReadPlanIssue(_sample()), CpuEmvReadPlanIssue.noUsableAfl);
+      expect(
+        cpuEmvReadPlanIssue(ordinary),
+        CpuEmvReadPlanIssue.applicationNotSelected,
+      );
+    },
+  );
 
   test('format 1 GPO includes AIP and AFL rather than a card number', () {
     final result = summarizeCpuEmv([
@@ -105,116 +146,175 @@ void main() {
     expect(result.maskedPan, isNull);
   });
 
-  test('malformed response is isolated and previous selection remains usable', () {
-    for (final malformed in [
-      '7781', '7780', '77055A04AA', '9F81810100', '77059403080101',
-    ]) {
-      final result = summarizeCpuEmv([
-        _sample()[1], _pair('80A8000002830000', cpuHex(malformed)),
-      ]);
-      expect(result.applicationLabel, 'PBOC DEBIT');
-      expect(result.steps.last.malformedData, isTrue, reason: malformed);
-      expect(result.maskedPan, isNull, reason: malformed);
-    }
-  });
+  test(
+    'malformed response is isolated and previous selection remains usable',
+    () {
+      for (final malformed in [
+        '7781',
+        '7780',
+        '77055A04AA',
+        '9F81810100',
+        '77059403080101',
+      ]) {
+        final result = summarizeCpuEmv([
+          _sample()[1],
+          _pair('80A8000002830000', cpuHex(malformed)),
+        ]);
+        expect(result.applicationLabel, 'PBOC DEBIT');
+        expect(result.steps.last.malformedData, isTrue, reason: malformed);
+        expect(result.maskedPan, isNull, reason: malformed);
+      }
+    },
+  );
 
   test('constructed TLV recursion and invalid dates are bounded', () {
     var nested = _tlv(0x5A, cpuHex('6212340000000123'));
     for (var n = 0; n < 10; n++) {
       nested = _tlv(0x77, nested);
     }
-    expect(summarizeCpuEmv([_pair('80A8000002830000', nested)])
-      .hasMalformedData, isTrue);
+    expect(
+      summarizeCpuEmv([_pair('80A8000002830000', nested)]).hasMalformedData,
+      isTrue,
+    );
     final result = summarizeCpuEmv([
       _pair('80A8000002830000', _tlv(0x77, _tlv(0x5F24, cpuHex('301301')))),
     ]);
     expect(result.expiry, isNull);
   });
 
-  testWidgets('summary is readable on a narrow handset without exposing raw PAN', (tester) async {
-    await tester.binding.setSurfaceSize(const Size(360, 780));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-    await tester.pumpWidget(_app(SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: CpuEmvSummaryPanel(summary: summarizeCpuEmv(_sample())),
-    )));
-    await tester.pumpAndSettle();
-    expect(find.text('PBOC DEBIT'), findsOneWidget);
-    expect(find.text('6212340000000001234'), findsNothing);
-    expect(find.text('9000 · Success'), findsNWidgets(3));
-    expect(tester.takeException(), isNull);
-  });
+  testWidgets(
+    'summary is readable on a narrow handset without exposing raw PAN',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(360, 780));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        _app(
+          SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: CpuEmvSummaryPanel(summary: summarizeCpuEmv(_sample())),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('PBOC DEBIT'), findsOneWidget);
+      expect(find.text('6212340000000001234'), findsNothing);
+      expect(find.text('9000 · Success'), findsNWidgets(3));
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('Chinese summary wraps at increased text size', (tester) async {
     await tester.binding.setSurfaceSize(const Size(320, 760));
     addTearDown(() => tester.binding.setSurfaceSize(null));
-    await tester.pumpWidget(_app(MediaQuery(
-      data: const MediaQueryData(textScaler: TextScaler.linear(1.3)),
-      child: SingleChildScrollView(padding: const EdgeInsets.all(12),
-        child: CpuEmvSummaryPanel(summary: summarizeCpuEmv(_sample()))),
-    ), locale: const Locale('zh')));
+    await tester.pumpWidget(
+      _app(
+        MediaQuery(
+          data: const MediaQueryData(textScaler: TextScaler.linear(1.3)),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(12),
+            child: CpuEmvSummaryPanel(summary: summarizeCpuEmv(_sample())),
+          ),
+        ),
+        locale: const Locale('zh'),
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.text('应用名称'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('read page starts with no editor or fabricated simulation profile', (tester) async {
-    SharedPreferences.setMockInitialValues({});
-    final prefs = SharedPreferencesProvider();
-    await prefs.load();
-    await tester.binding.setSurfaceSize(const Size(390, 844));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-    await tester.pumpWidget(ChangeNotifierProvider.value(
-      value: ChameleonGUIState(prefs), child: _app(const SingleChildScrollView(child: CpuCardMenu(readOnly:true,embedded:true))),
-    ));
-    await tester.pumpAndSettle();
-    expect(find.byType(TabBar), findsNothing);
-    expect(find.byType(TextField), findsNothing);
-    expect(find.text('JSON'), findsNothing);
-    await tester.pumpWidget(ChangeNotifierProvider.value(
-      value: ChameleonGUIState(prefs), child: _app(const CpuCardMenu()),
-    ));
-    await tester.pumpAndSettle();
-    expect(find.text('Read'), findsNothing);
-    expect(find.text('No emulation profile yet'), findsNothing);
-    expect(find.byType(TabBar), findsNothing);
-    expect(find.text('CPU card'), findsNothing);
-    expect(find.byType(TextField), findsOneWidget);
-    expect(find.text('JSON'), findsNothing);
-    expect(tester.takeException(), isNull);
-  });
+  testWidgets(
+    'read page starts with no editor or fabricated simulation profile',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = SharedPreferencesProvider();
+      await prefs.load();
+      await tester.binding.setSurfaceSize(const Size(390, 844));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        ChangeNotifierProvider.value(
+          value: ChameleonGUIState(prefs),
+          child: _app(
+            const SingleChildScrollView(
+              child: CpuCardMenu(readOnly: true, embedded: true),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(TabBar), findsNothing);
+      expect(find.byType(TextField), findsNothing);
+      expect(find.text('JSON'), findsNothing);
+      await tester.pumpWidget(
+        ChangeNotifierProvider.value(
+          value: ChameleonGUIState(prefs),
+          child: _app(const CpuCardMenu()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Read'), findsNothing);
+      expect(find.text('No emulation profile yet'), findsNothing);
+      expect(find.byType(TabBar), findsNothing);
+      expect(find.text('CPU card'), findsNothing);
+      expect(find.byType(TextField), findsOneWidget);
+      expect(find.text('JSON'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
-  testWidgets('real radio values survive expansion, rereading and resize', (tester) async {
-    await tester.binding.setSurfaceSize(const Size(320,760));
-    addTearDown(()=>tester.binding.setSurfaceSize(null));
-    var identity = CardData(uid:cpuHex('CB2E2033'),atqa:cpuHex('0400'),sak:0x20,
-      ats:cpuHex('0D7880A002808660907319A500'));
+  testWidgets('real radio values survive expansion, rereading and resize', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(320, 760));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    var identity = CardData(
+      uid: cpuHex('CB2E2033'),
+      atqa: cpuHex('0004'),
+      sak: 0x20,
+      ats: cpuHex('0D7880A002808660907319A500'),
+    );
     late StateSetter update;
-    await tester.pumpWidget(_app(MediaQuery(
-      data:const MediaQueryData(textScaler:TextScaler.linear(1.3)),
-      child:StatefulBuilder(builder:(context,setState) {
-        update=setState;
-        return ListView(padding:const EdgeInsets.all(16),children:[
-          CpuIdentityPanel(identity:identity),
-          CpuEmvSummaryPanel(summary:summarizeCpuEmv(_sample())),
-        ]);
-      })),locale:const Locale('zh')));
+    await tester.pumpWidget(
+      _app(
+        MediaQuery(
+          data: const MediaQueryData(textScaler: TextScaler.linear(1.3)),
+          child: StatefulBuilder(
+            builder: (context, setState) {
+              update = setState;
+              return ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  CpuIdentityPanel(identity: identity),
+                  CpuEmvSummaryPanel(summary: summarizeCpuEmv(_sample())),
+                ],
+              );
+            },
+          ),
+        ),
+        locale: const Locale('zh'),
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('射频参数'));
     await tester.pumpAndSettle();
-    expect(find.text('ATQA'),findsOneWidget);
-    expect(tester.takeException(),isNull);
-    update(()=>identity=CardData(uid:cpuHex('07589D5E'),atqa:cpuHex('0400'),sak:0x20,
-      ats:cpuHex('0D7880A002808660907319A500')));
+    expect(find.text('ATQA'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    update(
+      () => identity = CardData(
+        uid: cpuHex('07589D5E'),
+        atqa: cpuHex('0004'),
+        sak: 0x20,
+        ats: cpuHex('0D7880A002808660907319A500'),
+      ),
+    );
     await tester.pumpAndSettle();
-    expect(find.text('07 58 9D 5E'),findsOneWidget);
-    await tester.binding.setSurfaceSize(const Size(844,390));
+    expect(find.text('07 58 9D 5E'), findsOneWidget);
+    await tester.binding.setSurfaceSize(const Size(844, 390));
     await tester.pumpAndSettle();
-    expect(tester.takeException(),isNull);
-    await tester.binding.setSurfaceSize(const Size(360,780));
+    expect(tester.takeException(), isNull);
+    await tester.binding.setSurfaceSize(const Size(360, 780));
     await tester.pumpAndSettle();
-    expect(find.text('ATQA'),findsOneWidget);
-    expect(tester.takeException(),isNull);
+    expect(find.text('ATQA'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
-
 }

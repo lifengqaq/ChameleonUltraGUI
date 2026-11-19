@@ -1,4 +1,5 @@
 import 'package:chameleonultragui/helpers/hf14a4_slot.dart';
+
 import 'dart:typed_data';
 
 import 'package:chameleonultragui/bridge/chameleon.dart';
@@ -35,14 +36,14 @@ class Device extends ChameleonCommunicator {
 
 final identity = CardData(
   uid: cpuHex('04010203'),
-  atqa: cpuHex('0400'),
+  atqa: cpuHex('0004'),
   sak: 0x20,
   ats: cpuHex('067580700200'),
 );
 List<int> identityBytes() => [
   4,
   ...identity.uid,
-  ...identity.atqa,
+  ...cpuAtqaToWire(identity.atqa),
   0x20,
   6,
   ...identity.ats,
@@ -50,20 +51,31 @@ List<int> identityBytes() => [
 void main() {
   test('CPU failures retain structured command and RF status', () async {
     final device = Device()..reply(1, []);
-    await expectLater(device.hf14a4EmvScan(), throwsA(
-      isA<CpuCommandError>()
-        .having((error) => error.command, 'command', 6005)
-        .having((error) => error.status, 'status', 1),
-    ));
+    await expectLater(
+      device.hf14a4EmvScan(),
+      throwsA(
+        isA<CpuCommandError>()
+            .having((error) => error.command, 'command', 6005)
+            .having((error) => error.status, 'status', 1),
+      ),
+    );
   });
 
-  test('shared identity helper leaves MIFARE block dumps out of CPU validation', () async {
-    final device = Device()..reply(0x68, []);
-    final card = CardSave(uid: '01020304', name: 'EV1', tag: TagType.mifare2K,
-        atqa: Uint8List(2), data: List.generate(72, (i) => Uint8List(16)));
-    await writeHf14a4SlotIdentity(device, card);
-    expect(device.calls.single.$1, ChameleonCommand.mf1SetAntiCollision);
-  });
+  test(
+    'shared identity helper leaves MIFARE block dumps out of CPU validation',
+    () async {
+      final device = Device()..reply(0x68, []);
+      final card = CardSave(
+        uid: '01020304',
+        name: 'EV1',
+        tag: TagType.mifare2K,
+        atqa: Uint8List(2),
+        data: List.generate(72, (i) => Uint8List(16)),
+      );
+      await writeHf14a4SlotIdentity(device, card);
+      expect(device.calls.single.$1, ChameleonCommand.mf1SetAntiCollision);
+    },
+  );
 
   test('strict hex and full identity bounds', () {
     expect(cpuHex('00 A4\n04'), [0, 0xA4, 4]);
@@ -79,9 +91,56 @@ void main() {
       );
     }
     expect(parseCpuIdentity(packed).$1.uid, identity.uid);
+    expect(parseCpuIdentity(packed).$1.atqa, cpuHex('0004'));
+    expect(cpuAtqaFromWire(cpuHex('0400')), cpuHex('0004'));
+    expect(cpuAtqaToWire(cpuHex('0004')), cpuHex('0400'));
     expect(() => parseCpuIdentity(packed, offset: -1), throwsFormatException);
-    final invalidAts = Uint8List.fromList([4,4,1,2,3,4,0,0x20,2,2,0x75]);
+    final invalidAts = Uint8List.fromList([
+      4,
+      4,
+      1,
+      2,
+      3,
+      4,
+      0,
+      0x20,
+      2,
+      2,
+      0x75,
+    ]);
     expect(() => parseCpuIdentity(invalidAts), throwsFormatException);
+  });
+
+  test('legacy scan and CPU scan both normalize ATQA; both upload paths restore wire order', () async {
+    final raw = <int>[4, ...identity.uid, 0x04, 0x00, 0x20, 6, ...identity.ats];
+    final scanDevice = Device()..reply(0x68, raw);
+    expect((await scanDevice.scan14443aTag())!.atqa, cpuHex('0004'));
+
+    final keepDevice = Device()..reply(0x68, raw);
+    expect((await keepDevice.scan14443aTagKeep()).single.atqa, cpuHex('0004'));
+
+    final slotReadDevice = Device()..reply(0x68, raw);
+    expect((await slotReadDevice.mf1GetAntiCollData()).atqa, cpuHex('0004'));
+
+    final sessionDevice = Device()..reply(0, raw);
+    expect((await sessionDevice.hf14a4OpenSession()).atqa, cpuHex('0004'));
+
+    final legacyUpload = Device()..reply(0x68, []);
+    await legacyUpload.setMf1AntiCollision(identity);
+    expect(legacyUpload.calls.single.$2.sublist(5, 7), cpuHex('0400'));
+
+    final cpuUpload = Device()..reply(0x68, []);
+    await cpuUpload.hf14a4SetAntiColl(
+      identity.uid,
+      identity.atqa,
+      identity.sak,
+      identity.ats,
+    );
+    expect(cpuUpload.calls.single.$2.sublist(5, 7), cpuHex('0400'));
+
+    final card = cpuProfileFromJson(cpuProfileJson(identity, []));
+    expect(card.atqa, cpuHex('0004'));
+    expect(CardSave.fromJson(card.toJson()).atqa, cpuHex('0004'));
   });
   test('profile and library JSON retain APDU pairs', () {
     final pair = CpuApduPair(cpuHex('00A4'), cpuHex('9000'));

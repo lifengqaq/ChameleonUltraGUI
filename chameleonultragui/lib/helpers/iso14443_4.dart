@@ -1,4 +1,5 @@
 import 'package:chameleonultragui/helpers/iso7816_fs.dart';
+
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -24,7 +25,9 @@ class CpuCommandError extends StateError {
   final int command;
   final int? status;
   CpuCommandError(this.command, this.status)
-      : super('ISO-DEP $command: ${status == null ? "no response" : "status 0x${status.toRadixString(16)}"}');
+    : super(
+        'ISO-DEP $command: ${status == null ? "no response" : "status 0x${status.toRadixString(16)}"}',
+      );
 }
 
 class CpuApduPair {
@@ -35,6 +38,16 @@ class CpuApduPair {
       ? throw const FormatException('APDU response has no status word')
       : (response[response.length - 2] << 8) | response.last;
 }
+
+/// CardData and card-library ATQA bytes use the byte order displayed by the
+/// legacy ISO 14443-A reader. Device command payloads carry the RF byte order.
+Uint8List cpuAtqaFromWire(List<int> atqa) {
+  if (atqa.length != 2)
+    throw ArgumentError.value(atqa, 'atqa', 'Expected two bytes');
+  return Uint8List.fromList([atqa[1], atqa[0]]);
+}
+
+Uint8List cpuAtqaToWire(List<int> atqa) => cpuAtqaFromWire(atqa);
 
 List<CpuApduPair> cpuRulesFromData(List<Uint8List> data) {
   if (data.length.isOdd) throw const FormatException('Unpaired APDU response');
@@ -76,14 +89,15 @@ void validateCpuRules(List<CpuApduPair> pairs) {
 /// Validate the entire packed card header before accessing any variable field.
 (CardData, int) parseCpuIdentity(Uint8List bytes, {int offset = 0}) {
   var i = offset;
-  if (i < 0 || i >= bytes.length) throw const FormatException('Missing card identity');
+  if (i < 0 || i >= bytes.length)
+    throw const FormatException('Missing card identity');
   final uidLength = bytes[i++];
   if (![4, 7, 10].contains(uidLength) || i + uidLength + 4 > bytes.length) {
     throw const FormatException('Truncated card identity');
   }
   final uid = Uint8List.fromList(bytes.sublist(i, i + uidLength));
   i += uidLength;
-  final atqa = Uint8List.fromList(bytes.sublist(i, i + 2));
+  final atqa = cpuAtqaFromWire(bytes.sublist(i, i + 2));
   i += 2;
   final sak = bytes[i++];
   final atsLength = bytes[i++];
@@ -103,7 +117,8 @@ void validateCpuRules(List<CpuApduPair> pairs) {
     interfaceOffset++;
   }
   if ((bytes[i + 1] & 0x40) != 0) interfaceOffset++;
-  if (interfaceOffset > atsLength) throw const FormatException('Truncated ATS interface bytes');
+  if (interfaceOffset > atsLength)
+    throw const FormatException('Truncated ATS interface bytes');
   final ats = Uint8List.fromList(bytes.sublist(i, i + atsLength));
   i += atsLength;
   return (CardData(uid: uid, atqa: atqa, sak: sak, ats: ats), i);
@@ -182,8 +197,8 @@ String cpuProfileJson(
   String name = 'CPU card',
   CpuFileSystem? filesystem,
 }) {
-  if (filesystem != null) filesystem.encode();
-  if (filesystem != null && pairs.isNotEmpty) throw const FormatException('文件系统与静态响应表需选择一种模拟模式');
+  if (filesystem != null && pairs.isNotEmpty)
+    throw const FormatException('文件系统与静态响应表需选择一种模拟模式');
   return const JsonEncoder.withIndent('  ').convert({
     'format': 'chameleon-iso14443-4',
     'version': filesystem == null ? 1 : 2,
@@ -193,19 +208,21 @@ String cpuProfileJson(
     'sak': identity.sak.toRadixString(16).padLeft(2, '0'),
     'ats': bytesToHex(identity.ats),
     if (filesystem != null) 'filesystem': filesystem.toJson(),
-    if (filesystem == null) 'responses': [
-      for (final pair in pairs)
-        {
-          'command': bytesToHex(pair.command),
-          'response': bytesToHex(pair.response),
-        },
-    ],
+    if (filesystem == null)
+      'responses': [
+        for (final pair in pairs)
+          {
+            'command': bytesToHex(pair.command),
+            'response': bytesToHex(pair.response),
+          },
+      ],
   });
 }
 
 CardSave cpuProfileFromJson(String source) {
   final data = jsonDecode(source) as Map<String, dynamic>;
-  if (data['format'] != 'chameleon-iso14443-4' || ![1, 2].contains(data['version'])) {
+  if (data['format'] != 'chameleon-iso14443-4' ||
+      ![1, 2].contains(data['version'])) {
     throw const FormatException('Unsupported CPU card profile');
   }
   final uid = cpuHex(data['uid'] as String, min: 4, max: 10);
@@ -213,14 +230,23 @@ CardSave cpuProfileFromJson(String source) {
   final sak = cpuHex(data['sak'] as String, min: 1, max: 1).first;
   final ats = cpuHex(data['ats'] as String, min: 2, max: 255);
   parseCpuIdentity(
-    Uint8List.fromList([uid.length, ...uid, ...atqa, sak, ats.length, ...ats]),
+    Uint8List.fromList([
+      uid.length,
+      ...uid,
+      ...cpuAtqaToWire(atqa),
+      sak,
+      ats.length,
+      ...ats,
+    ]),
   );
   final fsValue = data['filesystem'];
   if ((data['version'] == 2) != (fsValue is Map<String, dynamic>) ||
       (fsValue != null && data['responses'] != null)) {
     throw const FormatException('文件系统配置使用 version 2，且与 responses 互斥');
   }
-  final filesystem = fsValue == null ? null : CpuFileSystem.fromJson(fsValue as Map<String, dynamic>);
+  final filesystem = fsValue == null
+      ? null
+      : CpuFileSystem.fromJson(fsValue as Map<String, dynamic>);
   final rawResponses = data['responses'] ?? <dynamic>[];
   if (rawResponses is! List) throw const FormatException('responses 需要数组');
   final pairs = [
@@ -245,10 +271,17 @@ CardSave cpuProfileFromJson(String source) {
   );
 }
 
-
 String cpuSavedProfileJson(CardSave card) {
   final image = cpuFilesystemFromData(card.data);
-  return cpuProfileJson(CardData(uid: hexToBytes(card.uid), atqa: card.atqa,
-    sak: card.sak, ats: card.ats), image == null ? cpuRulesFromData(card.data) : [],
-    name: card.name, filesystem: image == null ? null : CpuFileSystem.decode(image));
+  return cpuProfileJson(
+    CardData(
+      uid: hexToBytes(card.uid),
+      atqa: card.atqa,
+      sak: card.sak,
+      ats: card.ats,
+    ),
+    image == null ? cpuRulesFromData(card.data) : [],
+    name: card.name,
+    filesystem: image == null ? null : CpuFileSystem.decode(image),
+  );
 }
