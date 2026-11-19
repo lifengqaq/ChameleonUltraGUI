@@ -28,7 +28,8 @@ class ChameleonCommunicator {
   // The protocol has no request IDs: consume a late reply before reusing its command.
   final Set<int> _timedOutCommands = {};
   bool _sensitiveCommand(int command) => command == ChameleonCommand.hf14a4ReaderApdu.value ||
-    command == ChameleonCommand.hf14a4Filesystem.value;
+    command == ChameleonCommand.hf14a4Filesystem.value ||
+    command == ChameleonCommand.hf14a4ManagedSession.value;
 
   final Logger log;
 
@@ -1612,6 +1613,35 @@ class ChameleonCommunicator {
 
   Future<void> hf14a4CloseSession() async {
     await _cpuCommand(ChameleonCommand.hf14a4Session, data: Uint8List.fromList([0]));
+  }
+
+  Future<(CardData, Uint8List)> hf14a4OpenManagedSession() async {
+    final bytes = await _cpuCommand(ChameleonCommand.hf14a4ManagedSession,
+        data: Uint8List.fromList([1]), success: 0);
+    if (bytes.length < 4) throw const FormatException('Missing ISO-DEP session ID');
+    final id = bytes.sublist(0, 4);
+    try {
+      final (identity, end) = parseCpuIdentity(bytes, offset: 4);
+      if (end != bytes.length) throw const FormatException('Trailing session data');
+      return (identity, id);
+    } on FormatException {
+      try { await hf14a4CloseManagedSession(id); } catch (_) {}
+      rethrow;
+    }
+  }
+
+  Future<void> hf14a4CloseManagedSession(Uint8List id) async {
+    await _cpuCommand(ChameleonCommand.hf14a4ManagedSession,
+        data: Uint8List.fromList([0, ...id]));
+  }
+
+  Future<Uint8List> hf14a4ManagedApdu(Uint8List id, Uint8List apdu) {
+    if (id.length != 4 || apdu.length < 4 || apdu.length > 260) {
+      throw ArgumentError('Invalid managed APDU frame');
+    }
+    return _cpuCommand(ChameleonCommand.hf14a4ManagedSession,
+        data: Uint8List.fromList([2, ...id, ...apdu]), success: 0,
+        timeout: const Duration(seconds: 45));
   }
 
   Future<Uint8List> hf14a4ReaderApdu(Uint8List apdu) async {

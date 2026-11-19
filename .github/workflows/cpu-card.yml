@@ -24,6 +24,7 @@ jobs:
           flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings
           lib/gui/menu/tools/cpu_card.dart lib/helpers/iso14443_4.dart
           lib/gui/menu/tools/cpu_emv_summary.dart lib/helpers/cpu_emv.dart
+          lib/gui/menu/tools/cpu_card_manager.dart lib/gui/menu/tools/cpu_profiles.dart lib/helpers/cpu_card_access.dart test/cpu_card_access_test.dart
           test/cpu_emv_test.dart test/cpu_page_storage_test.dart lib/helpers/iso7816_fs.dart
           lib/gui/menu/tools/cpu_filesystem.dart test/iso7816_fs_test.dart test/cpu_slot_transaction_test.dart
           lib/gui/page/slot_manager.dart lib/gui/page/read_card.dart lib/gui/page/tools.dart

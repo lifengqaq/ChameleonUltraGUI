@@ -71,7 +71,12 @@ List<CpuDumpTarget> parseCpuDumpPaths(
 }
 
 /// Bounded BER-TLV lookup for file descriptors, sizes and directory AIDs.
-List<Uint8List> cpuFindTlv(Uint8List data, int wanted, [int depth = 0]) {
+List<Uint8List> cpuFindTlv(
+  Uint8List data,
+  int wanted, {
+  bool recursive = true,
+  int depth = 0,
+}) {
   if (depth > 8) return [];
   final found = <Uint8List>[];
   var offset = 0;
@@ -102,7 +107,9 @@ List<Uint8List> cpuFindTlv(Uint8List data, int wanted, [int depth = 0]) {
     final value = Uint8List.fromList(data.sublist(offset, offset + length));
     offset += length;
     if (tag == wanted) found.add(value);
-    if (first & 32 != 0) found.addAll(cpuFindTlv(value, wanted, depth + 1));
+    if (recursive && first & 32 != 0) {
+      found.addAll(cpuFindTlv(value, wanted, depth: depth + 1));
+    }
   }
   return found;
 }
@@ -484,18 +491,24 @@ analyzeCpuEmvReadPlan(List<CpuApduPair> capture) {
       final first = afl[offset + 1];
       final last = afl[offset + 2];
       if (afl[offset] & 7 != 0 ||
-          sfi < 1 || sfi > 30 || first < 1 || last < first || last > 254) {
+          sfi < 1 ||
+          sfi > 30 ||
+          first < 1 ||
+          last < first ||
+          last > 254) {
         continue;
       }
       if (seen.add('${_hex(aid)}:$sfi:$first:$last')) {
-        targets.add(CpuDumpTarget(
-          [],
-          aid: aid,
-          type: 2,
-          sfi: sfi,
-          firstRecord: first,
-          lastRecord: last,
-        ));
+        targets.add(
+          CpuDumpTarget(
+            [],
+            aid: aid,
+            type: 2,
+            sfi: sfi,
+            firstRecord: first,
+            lastRecord: last,
+          ),
+        );
       }
     }
   }

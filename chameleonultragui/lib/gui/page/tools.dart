@@ -1,4 +1,5 @@
 import 'package:chameleonultragui/gui/menu/tools/t55xx_block_editor.dart';
+import 'package:chameleonultragui/gui/menu/tools/cpu_card_manager.dart';
 import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
 import 'package:chameleonultragui/gui/menu/tools/dictionary_download.dart';
 import 'package:chameleonultragui/gui/menu/tools/hf_sniffing.dart';
@@ -47,6 +48,13 @@ class ToolsPageState extends State<ToolsPage> {
     var localizations = AppLocalizations.of(context)!;
 
     List<ToolItem> tools = [
+      ToolItem(
+        name: localizations.cpu_manage_title,
+        description: localizations.cpu_manage_description,
+        icon: Icons.contactless_outlined,
+        fullScreen: true,
+        onPressed: const CpuCardManager(),
+      ),
       ToolItem(
         name: localizations.live_value_blocks,
         description: localizations.value_block_tool_description,

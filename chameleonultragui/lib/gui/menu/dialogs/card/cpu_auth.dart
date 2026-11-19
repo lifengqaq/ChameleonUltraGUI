@@ -5,15 +5,18 @@ import 'package:flutter/material.dart';
 Future<bool> showCpuAuthentication(BuildContext context, {
   required CpuAuthExchange exchange, required CpuAuthHistory history,
   CpuAuthSettings initial = const CpuAuthSettings(),
+  bool prefillCredential = true,
 }) async => await showDialog<bool>(context: context, barrierDismissible: false,
-  builder: (_) => CpuAuthenticationDialog(exchange: exchange, history: history, initial: initial)) ?? false;
+  builder: (_) => CpuAuthenticationDialog(exchange: exchange, history: history,
+    initial: initial, prefillCredential: prefillCredential)) ?? false;
 
 class CpuAuthenticationDialog extends StatefulWidget {
   final CpuAuthExchange exchange;
   final CpuAuthHistory history;
   final CpuAuthSettings initial;
+  final bool prefillCredential;
   const CpuAuthenticationDialog({super.key, required this.exchange,
-    required this.history, this.initial = const CpuAuthSettings()});
+    required this.history, this.initial = const CpuAuthSettings(), this.prefillCredential = true});
   @override
   State<CpuAuthenticationDialog> createState() => _CpuAuthenticationDialogState();
 }
@@ -28,13 +31,17 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
   CpuAuthSettings get _settings => CpuAuthSettings(method: _method,
     pinEncoding: _encoding, reference: int.tryParse(_reference.text, radix: 16) ?? 0,
     algorithm: int.tryParse(_algorithm.text, radix: 16) ?? 0);
+  String _suggestedCredential() => !widget.prefillCredential ? '' : switch (_method) {
+    CpuAuthMethod.pin => '000000',
+    CpuAuthMethod.des => 'FFFFFFFFFFFFFFFF',
+    CpuAuthMethod.tdes => 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF',
+  };
   @override
   void initState() {
     super.initState();
     _method = widget.initial.method;
     _encoding = widget.initial.pinEncoding;
-    _credential = TextEditingController(text: _method == CpuAuthMethod.pin ? '000000'
-      : _method == CpuAuthMethod.des ? 'FFFFFFFFFFFFFFFF' : 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF');
+    _credential = TextEditingController(text: _suggestedCredential());
     _reference = TextEditingController(text: widget.initial.reference.toRadixString(16).padLeft(2, '0'));
     _algorithm = TextEditingController(text: widget.initial.algorithm.toRadixString(16).padLeft(2, '0'));
     _result = widget.history.forSettings(_settings);
@@ -97,7 +104,7 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
       content: SizedBox(width: 440, child: SingleChildScrollView(
         key: const PageStorageKey('cpu-auth-dialog-scroll'), child: Column(
           mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            Text(l.cpu_auth_help),
+            Text(widget.prefillCredential ? l.cpu_auth_help : l.cpu_manage_auth_help),
             DropdownButtonFormField<CpuAuthMethod>(isExpanded: true, value: _method,
               decoration: InputDecoration(labelText: l.cpu_auth_type), items: [
                 const DropdownMenuItem(value: CpuAuthMethod.pin, child: Text('PIN')),
@@ -107,8 +114,7 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
                 if (value == null) return;
                 setState(() {
                   _method = value;
-                  _credential.text = value == CpuAuthMethod.pin ? '000000' : value == CpuAuthMethod.des
-                    ? 'FFFFFFFFFFFFFFFF' : 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF';
+                  _credential.text = _suggestedCredential();
                   _result = widget.history.forSettings(_settings); _error = null;
                 });
               }),

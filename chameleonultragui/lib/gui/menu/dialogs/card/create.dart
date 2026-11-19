@@ -18,15 +18,16 @@ import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
 
 class CardCreateMenu extends StatefulWidget {
   final String? folderId;
+  final TagType initialType;
 
-  const CardCreateMenu({super.key, this.folderId});
+  const CardCreateMenu({super.key, this.folderId, this.initialType = TagType.mifare1K});
 
   @override
   CardCreateMenuState createState() => CardCreateMenuState();
 }
 
 class CardCreateMenuState extends State<CardCreateMenu> {
-  TagType selectedType = TagType.mifare1K;
+  late TagType selectedType = widget.initialType;
   TextEditingController nameController = TextEditingController();
   TextEditingController uidController = TextEditingController();
   TextEditingController sakController = TextEditingController();
