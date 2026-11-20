@@ -26,6 +26,7 @@ class CpuLiveFile {
   final Uint8List control;
   final CpuLiveFileKind kind;
   final bool canChange;
+  final String label;
 
   bool get isDirectory => kind == CpuLiveFileKind.directory;
   bool get supportsBinary =>
@@ -42,6 +43,7 @@ class CpuLiveFile {
     this.recordLength,
     this.recordCount,
     this.canChange,
+    this.label,
   );
 
   factory CpuLiveFile.fromSelect(
@@ -102,6 +104,7 @@ class CpuLiveFile {
       recordLength == 0 ? null : recordLength,
       count,
       typedSelection || kind != null,
+      cpuDirectoryLabel(firstField(firstField(fci, 0xA5), 0x50) ?? field(0x50)),
     );
   }
 }
@@ -119,7 +122,59 @@ List<int> _fid(int id) {
 class CpuDirectoryApplication {
   final Uint8List aid;
   final String label;
-  CpuDirectoryApplication(this.aid, this.label);
+  final List<int> path;
+  CpuDirectoryApplication(this.aid, this.label, this.path);
+}
+
+String cpuDirectoryLabel(Uint8List? value) => value == null
+    ? ''
+    : utf8
+          .decode(value.take(64).toList(), allowMalformed: true)
+          .replaceAll(
+            RegExp(r'[\x00-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]'),
+            '',
+          )
+          .trim();
+
+/// Parse only fields directly in a published application template. Arbitrary
+/// proprietary TLVs elsewhere in a reply do not name children or paths.
+List<CpuDirectoryApplication> cpuDirectoryApplications(
+  Iterable<Uint8List> records, {
+  bool allowPath = true,
+}) {
+  final apps = <String, CpuDirectoryApplication>{};
+  for (final record in records) {
+    for (final template in cpuFindTlv(record, 0x61, recursive: false)) {
+      Uint8List? field(int tag) =>
+          cpuFindTlv(template, tag, recursive: false).firstOrNull;
+      final aid = field(0x4F);
+      if (aid == null || aid.length < 5 || aid.length > 16) continue;
+      final path = <int>[];
+      final encoded = allowPath ? field(0x51) : null;
+      if (encoded != null && encoded.length.isEven && encoded.length <= 34) {
+        for (var i = 0; i < encoded.length; i += 2) {
+          path.add(encoded[i] << 8 | encoded[i + 1]);
+        }
+        if (path.firstOrNull == 0x3F00) path.removeAt(0);
+        if (path.length > 16 ||
+            path.any((fid) => [0, 0x3F00, 0x3FFF, 0xFFFF].contains(fid))) {
+          path.clear();
+        }
+      }
+      final key = aid.join('.');
+      final previous = apps[key];
+      final label = cpuDirectoryLabel(field(0x50));
+      if (previous == null && apps.length >= 32) continue;
+      apps[key] = CpuDirectoryApplication(
+        aid,
+        previous != null && previous.label.isNotEmpty ? previous.label : label,
+        previous != null && previous.path.isNotEmpty
+            ? previous.path
+            : List.unmodifiable(path),
+      );
+    }
+  }
+  return apps.values.toList();
 }
 
 /// ISO 7816 file operations on one already selected RF session, basic channel.
@@ -178,6 +233,22 @@ class CpuCardAccess {
     return _select(0x04, aid, directory: true, aid: aid);
   }
 
+  /// Type 4 EF selection uses the NFC Forum short SELECT without FCI.
+  Future<CpuLiveFile> selectType4File(int fid) async {
+    final reply = await _send([0, 0xA4, 0, 0x0C, 2, ..._fid(fid)]);
+    return CpuLiveFile._(
+      reply.data,
+      CpuLiveFileKind.binary,
+      fid,
+      null,
+      null,
+      null,
+      null,
+      false,
+      '',
+    );
+  }
+
   Future<CpuLiveFile> selectFile(int fid, {required bool directory}) async {
     final id = _fid(fid);
     try {
@@ -201,10 +272,14 @@ class CpuCardAccess {
     }
   }
 
-  Future<CpuLiveFile> selectPath(List<int> path, {required bool directory}) {
+  Future<CpuLiveFile> selectPath(
+    List<int> path, {
+    required bool directory,
+    bool relative = false,
+  }) {
     RangeError.checkValueInInterval(path.length, 1, 16, 'Path length');
     return _select(
-      0x08,
+      relative ? 0x09 : 0x08,
       [for (final id in path) ..._fid(id)],
       directory: directory,
       typedSelection: false,
@@ -319,11 +394,11 @@ class CpuCardAccess {
     return _send([0x00, 0xE4, 0x00, 0x00, 2, ..._fid(fid)]);
   }
 
-  /// Read only the published application directory. EF.DIR is optional and
-  /// does not enumerate private files in a DF. Reading leaves EF.DIR selected.
-  Future<List<CpuDirectoryApplication>> readApplications() async {
-    await selectMaster();
-    final directory = await selectFile(0x2F00, directory: false);
+  /// Read EF.DIR, which must already be selected; regular records and binary
+  /// directories share the same bounded application-template parser.
+  Future<List<CpuDirectoryApplication>> readApplicationEntries(
+    CpuLiveFile directory,
+  ) async {
     final records = <Uint8List>[];
     if (directory.kind == CpuLiveFileKind.binary) {
       records.add(await _readDirectoryBinary(directory.size));
@@ -346,29 +421,7 @@ class CpuCardAccess {
         }
       }
     }
-    final applications = <String, CpuDirectoryApplication>{};
-    for (final record in records) {
-      for (final template in cpuFindTlv(record, 0x61)) {
-        final aid = cpuFindTlv(template, 0x4F).firstOrNull;
-        if (aid == null || aid.length < 5 || aid.length > 16) continue;
-        final label = utf8
-            .decode(
-              cpuFindTlv(template, 0x50).firstOrNull ?? const [],
-              allowMalformed: true,
-            )
-            .replaceAll(
-              RegExp(r'[\x00-\x1F\x7F\u202A-\u202E\u2066-\u2069]'),
-              '',
-            )
-            .trim();
-        applications.putIfAbsent(
-          aid.join('.'),
-          () => CpuDirectoryApplication(aid, label),
-        );
-        if (applications.length == 32) return applications.values.toList();
-      }
-    }
-    return applications.values.toList();
+    return cpuDirectoryApplications(records);
   }
 
   Future<Uint8List> _readDirectoryBinary(int? size) async {

@@ -5,11 +5,13 @@ import 'package:chameleonultragui/connector/serial_abstract.dart';
 import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
 import 'package:chameleonultragui/gui/menu/dialogs/card/cpu_auth.dart';
 import 'package:chameleonultragui/gui/menu/tools/cpu_card.dart';
+import 'package:chameleonultragui/gui/menu/tools/cpu_directory_view.dart';
 import 'package:chameleonultragui/gui/menu/tools/cpu_emv_summary.dart';
 import 'package:chameleonultragui/gui/menu/tools/cpu_profiles.dart';
 import 'package:chameleonultragui/gui/page/slot_manager.dart';
 import 'package:chameleonultragui/helpers/cpu_auth.dart';
 import 'package:chameleonultragui/helpers/cpu_card_access.dart';
+import 'package:chameleonultragui/helpers/cpu_directory.dart';
 import 'package:chameleonultragui/helpers/definitions.dart';
 import 'package:chameleonultragui/helpers/general.dart';
 import 'package:chameleonultragui/helpers/iso14443_4.dart';
@@ -33,8 +35,9 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   _Link? _link;
   CardData? _identity;
   CpuLiveFile? _file, _directory;
-  String? _path, _directoryPath;
-  List<CpuDirectoryApplication>? _applications;
+  CpuFileAddress? _address, _directoryAddress;
+  CpuDirectoryTree _tree = CpuDirectoryTree();
+  CpuDirectoryScan? _directoryScan;
   CpuFileReply? _lastRead;
   String? _notice;
   bool _busy = false, _problem = false, _authenticated = false;
@@ -65,15 +68,16 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   void _forgetSelection() {
     _file = null;
     _directory = null;
-    _path = null;
-    _directoryPath = null;
+    _address = null;
+    _directoryAddress = null;
     _lastRead = null;
     _authenticated = false;
   }
 
   void _forgetSession() {
     _link = null;
-    _applications = null;
+    _tree = CpuDirectoryTree();
+    _directoryScan = null;
     _forgetSelection();
   }
 
@@ -114,6 +118,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
       _link = link;
       _identity = identity;
     });
+    await _discoverDirectory();
   }
 
   Future<Uint8List> _transmit(_Link link, Uint8List apdu) async {
@@ -213,25 +218,50 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   Future<void> _select(
     Future<CpuLiveFile> Function(CpuCardAccess) select, {
     bool relative = false,
-    String? path,
+    CpuFileAddress? address,
+    List<int>? expectedAid,
   }) async {
     final previousDirectory = relative ? _directory : null;
-    final previousPath = relative ? _directoryPath : null;
+    final previousAddress = relative ? _directoryAddress : null;
     final card = _card;
     setState(_forgetSelection);
     final file = await select(card);
     if (!mounted) return;
+    final explicitFid = address?.fid;
+    if (explicitFid != null && file.fid != null && file.fid != explicitFid) {
+      throw const FormatException('File ID differs from the published path');
+    }
+    if (expectedAid != null &&
+        file.aid != null &&
+        cpuAidHex(file.aid!) != cpuAidHex(expectedAid)) {
+      throw const FormatException(
+        'Application differs from the published directory',
+      );
+    }
+    final location =
+        address ??
+        (file.fid == 0x3F00
+            ? const CpuFileAddress.master()
+            : previousAddress != null && file.fid != null
+            ? previousAddress.child(file.fid!)
+            : null);
     setState(() {
       _file = file;
       _directory = file.isDirectory ? file : previousDirectory;
-      _path =
-          path ??
-          (file.fid == 0x3F00
-              ? '3F00'
-              : previousPath != null && file.fid != null
-              ? '$previousPath/${_hex(file.fid!, 4)}'
-              : null);
-      _directoryPath = file.isDirectory ? _path : previousPath;
+      _address = location;
+      _directoryAddress = file.isDirectory
+          ? location
+          : location?.parent ?? previousAddress;
+      if (location != null) {
+        _tree.add(
+          CpuDirectoryEntry(
+            location,
+            kind: file.kind,
+            label: file.label,
+            applicationAid: file.aid,
+          ),
+        );
+      }
     });
     _message(_status(0x9000));
   }
@@ -240,7 +270,11 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     final aid = await _prompt(_l.cpu_manage_select_aid, [
       _Field(_l.cpu_manage_aid),
     ], (values) => cpuHex(values.single, min: 5, max: 16));
-    if (aid != null && mounted) await _select((card) => card.selectAid(aid));
+    if (aid != null && mounted) {
+      final address =
+          _tree.applicationAddress(aid) ?? CpuFileAddress([], aid: aid);
+      await _select((card) => card.selectAid(aid), address: address);
+    }
   }
 
   Future<void> _chooseFile(bool directory) async {
@@ -269,18 +303,51 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     } else {
       await _select(
         (card) => card.selectPath(path.sublist(1), directory: directory),
-        path: path.map((id) => _hex(id, 4)).join('/'),
+        address: CpuFileAddress(path.sublist(1)),
       );
     }
   }
 
-  Future<void> _readApplications() async {
+  Future<void> _discoverDirectory() async {
+    setState(_forgetSelection);
+    final scan = await discoverCpuDirectory(_card);
+    if (!mounted) return;
     setState(() {
-      _forgetSelection();
-      _applications = null;
+      _tree.merge(scan.tree);
+      _directoryScan = scan;
+      if (scan.master != null) {
+        _file = _directory = scan.master;
+        _address = _directoryAddress = const CpuFileAddress.master();
+      }
     });
-    final applications = await _card.readApplications();
-    if (mounted) setState(() => _applications = applications);
+  }
+
+  Future<void> _openEntry(CpuDirectoryEntry entry) async {
+    if (_address?.display == entry.address.display && _file != null) return;
+    final parent = _directoryAddress;
+    await _select(
+      (card) => entry.address.open(
+        card,
+        directory: entry.isDirectory,
+        type4: entry.type4,
+        selectedDirectory: parent,
+      ),
+      address: entry.address,
+      expectedAid: entry.applicationAid,
+      relative:
+          parent != null && entry.address.parent?.display == parent.display,
+    );
+  }
+
+  Future<void> _readSelectedDirectory() async {
+    final applications = await _card.readApplicationEntries(_file!);
+    if (!mounted) return;
+    setState(() {
+      for (final app in applications) {
+        _tree.addApplication(app);
+      }
+    });
+    _message(applications.isEmpty ? _l.cpu_manage_no_apps : _status(0x9000));
   }
 
   Future<void> _read({required bool record}) async {
@@ -417,6 +484,17 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         recordCount: count,
       ),
       directoryChange: true,
+      onSuccess: _directoryAddress == null
+          ? null
+          : () {
+              _tree.add(
+                CpuDirectoryEntry(
+                  _directoryAddress!.child(fid),
+                  kind: kind,
+                  applicationAid: aid,
+                ),
+              );
+            },
     );
   }
 
@@ -438,6 +516,9 @@ class _CpuCardManagerState extends State<CpuCardManager> {
       () => _card.deleteFile(fid),
       directoryChange: true,
       warning: l.cpu_manage_delete_warning,
+      onSuccess: _directoryAddress == null
+          ? null
+          : () => _tree.remove(_directoryAddress!.child(fid)),
     );
   }
 
@@ -447,6 +528,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     Future<CpuFileReply> Function() send, {
     bool directoryChange = false,
     String? warning,
+    VoidCallback? onSuccess,
   }) async {
     final l = _l;
     if (!_active || _file == null) throw StateError(l.cpu_manage_session_lost);
@@ -477,14 +559,15 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     if (accepted != true || !mounted) return;
     if (!_active || _link != link || _file != file)
       throw StateError(l.cpu_manage_session_lost);
-    setState(() {
-      _lastRead = null;
-      if (directoryChange) _applications = null;
-    });
+    setState(() => _lastRead = null);
     try {
       final response = await send();
       if (!mounted) return;
-      if (directoryChange) setState(_forgetSelection);
+      if (directoryChange)
+        setState(() {
+          onSuccess?.call();
+          _forgetSelection();
+        });
       _message('$title · ${_status(response.status)}');
     } on CpuFileStatus catch (error) {
       if (error.word >> 8 == 0x63 || error.word >> 8 == 0x65) {
@@ -627,12 +710,12 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   }
 
   String _selectionLabel(CpuLiveFile file) {
-    final path = _path;
+    final address = _address;
     final parent = _directory;
-    if (path != null) {
-      return file.aid == null
-          ? path
-          : '$path · AID ${bytesToHexSpace(file.aid!)}';
+    if (address != null) {
+      return address.aid != null || file.aid == null
+          ? address.display
+          : '${address.display} · AID ${bytesToHexSpace(file.aid!)}';
     }
     return '${parent == null || parent == file ? '' : '${_describe(parent)} / '}${_describe(file)}';
   }
@@ -686,7 +769,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     final l = _l;
     final active = _active;
     final file = active ? _file : null;
-    final applications = active ? _applications : null;
+    final scan = _directoryScan;
     final read = active ? _lastRead : null;
     final online = _online;
     final canManageChildren =
@@ -770,6 +853,11 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                       runSpacing: 6,
                       children: [
                         _button(
+                          Icons.refresh,
+                          l.cpu_tree_refresh,
+                          () => _run(_discoverDirectory),
+                        ),
+                        _button(
                           Icons.home_outlined,
                           'MF 3F00',
                           () => _run(
@@ -780,11 +868,6 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                           Icons.apps,
                           l.cpu_manage_select_aid,
                           () => _run(_chooseAid),
-                        ),
-                        _button(
-                          Icons.list_alt,
-                          l.cpu_manage_list_apps,
-                          () => _run(_readApplications),
                         ),
                         _button(
                           Icons.folder_open,
@@ -801,37 +884,34 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                           l.cpu_manage_parent,
                           file?.isDirectory == true && file?.fid != 0x3F00
                               ? () => _run(
-                                  () => _select((card) => card.selectParent()),
+                                  () => _select(
+                                    (card) => card.selectParent(),
+                                    address: _directoryAddress?.parent,
+                                  ),
                                 )
                               : null,
                         ),
                       ],
                     ),
-                    if (applications != null && applications.isEmpty)
-                      Text(l.cpu_manage_no_apps),
-                    if (applications != null && applications.isNotEmpty) ...[
-                      Text(l.cpu_manage_list_apps),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 6,
-                        children: [
-                          for (final app in applications)
-                            ActionChip(
-                              label: Text(
-                                app.label.isEmpty
-                                    ? bytesToHexSpace(app.aid)
-                                    : '${app.label} · ${bytesToHexSpace(app.aid)}',
-                              ),
-                              onPressed: _busy
-                                  ? null
-                                  : () => _run(
-                                      () => _select(
-                                        (card) => card.selectAid(app.aid),
-                                      ),
-                                    ),
-                            ),
-                        ],
+                    if (!_tree.isEmpty)
+                      CpuDirectoryView(
+                        tree: _tree,
+                        selected: _address,
+                        onOpen: _busy
+                            ? null
+                            : (entry) => _run(() => _openEntry(entry)),
                       ),
+                    if (scan != null) ...[
+                      if (_tree.isEmpty ||
+                          (_tree.childrenOf(null).length == 1 &&
+                              _tree.childrenOf(null).single.isMaster &&
+                              _tree
+                                  .childrenOf(const CpuFileAddress.master())
+                                  .isEmpty))
+                        Text(l.cpu_tree_no_entries),
+                      if (scan.incomplete) Text(l.cpu_tree_incomplete),
+                      for (final item in scan.cardStatuses.entries)
+                        Text('${item.key}: ${_status(item.value)}'),
                     ],
                     if (file != null) ...[
                       const Divider(),
@@ -867,6 +947,12 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                         spacing: 8,
                         runSpacing: 6,
                         children: [
+                          if (_address?.display == '3F00/2F00')
+                            _button(
+                              Icons.list_alt,
+                              l.cpu_manage_list_apps,
+                              () => _run(_readSelectedDirectory),
+                            ),
                           if (file.supportsBinary) ...[
                             _button(
                               Icons.download,
