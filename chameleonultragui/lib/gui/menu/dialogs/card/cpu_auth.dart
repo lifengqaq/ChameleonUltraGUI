@@ -9,6 +9,7 @@ Future<bool> showCpuAuthentication(
   required CpuAuthHistory history,
   CpuAuthSettings initial = const CpuAuthSettings(),
   bool prefillCredential = true,
+  String? operation,
 }) async =>
     await showDialog<bool>(
       context: context,
@@ -18,6 +19,7 @@ Future<bool> showCpuAuthentication(
         history: history,
         initial: initial,
         prefillCredential: prefillCredential,
+        operation: operation,
       ),
     ) ??
     false;
@@ -27,12 +29,14 @@ class CpuAuthenticationDialog extends StatefulWidget {
   final CpuAuthHistory history;
   final CpuAuthSettings initial;
   final bool prefillCredential;
+  final String? operation;
   const CpuAuthenticationDialog({
     super.key,
     required this.exchange,
     required this.history,
     this.initial = const CpuAuthSettings(),
     this.prefillCredential = true,
+    this.operation,
   });
   @override
   State<CpuAuthenticationDialog> createState() =>
@@ -70,12 +74,16 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
     _sm4Challenge = widget.initial.sm4Challenge;
     _credential = TextEditingController(text: _suggestedCredential());
     _reference = TextEditingController(
-      text: widget.initial.reference.toRadixString(16).padLeft(2, '0'),
+      text: widget.operation == null
+          ? widget.initial.reference.toRadixString(16).padLeft(2, '0')
+          : '',
     );
     _algorithm = TextEditingController(
       text: widget.initial.algorithm.toRadixString(16).padLeft(2, '0'),
     );
-    _result = widget.history.forSettings(_settings);
+    _result = _reference.text.isEmpty
+        ? null
+        : widget.history.forSettings(_settings);
   }
 
   @override
@@ -88,7 +96,9 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
 
   void _changedReference() {
     setState(() {
-      _result = widget.history.forSettings(_settings);
+      _result = _reference.text.isEmpty
+          ? null
+          : widget.history.forSettings(_settings);
       _error = null;
     });
   }
@@ -195,6 +205,10 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                if (widget.operation case final operation?) ...[
+                  Text(operation),
+                  const SizedBox(height: 8),
+                ],
                 Text(
                   widget.prefillCredential
                       ? l.cpu_auth_help
@@ -337,7 +351,9 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
         actions: [
           TextButton(
             onPressed: _busy ? null : () => Navigator.pop(context, false),
-            child: Text(l.cancel),
+            child: Text(
+              widget.operation == null ? l.cancel : l.cpu_manage_without_key,
+            ),
           ),
           FilledButton(
             key: const ValueKey('cpu-auth-submit'),
@@ -345,7 +361,11 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
                 ? null
                 : _authenticate,
             child: Text(
-              _result == null ? l.cpu_authenticate : l.cpu_auth_continue,
+              widget.operation != null
+                  ? l.cpu_manage_auth_retry
+                  : _result == null
+                  ? l.cpu_authenticate
+                  : l.cpu_auth_continue,
             ),
           ),
         ],

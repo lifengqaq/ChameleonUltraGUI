@@ -3,13 +3,41 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:chameleonultragui/helpers/cpu_dump.dart' show cpuFindTlv;
+import 'package:chameleonultragui/helpers/cpu_auth.dart'
+    show CpuPinEncoding, cpuAuthStatus, cpuVerifyData;
 import 'package:chameleonultragui/helpers/iso14443_4.dart';
 
 enum CpuLiveFileKind { directory, binary, record, unknown }
 
+const cpuPseName = '1PAY.SYS.DDF01';
+const cpuPpseName = '2PAY.SYS.DDF01';
+
+bool cpuIsPaymentDirectoryName(List<int>? name) =>
+    name != null &&
+    {cpuPseName, cpuPpseName}.contains(String.fromCharCodes(name));
+
 class CpuFileStatus implements Exception {
   final int word;
-  const CpuFileStatus(this.word);
+  final bool originalRejected;
+  const CpuFileStatus(this.word, {this.originalRejected = true});
+}
+
+/// The card must reject the original operation with 6982 before asking for a
+/// credential. A successful, user-approved authentication authorizes one retry.
+Future<T> runCpuFileOperation<T>(
+  Future<T> Function() operation, {
+  Future<bool> Function()? authorize,
+}) async {
+  try {
+    return await operation();
+  } on CpuFileStatus catch (error) {
+    if (error.word != 0x6982 ||
+        !error.originalRejected ||
+        authorize == null ||
+        !await authorize())
+      rethrow;
+    return operation();
+  }
 }
 
 class CpuFileReply {
@@ -27,6 +55,7 @@ class CpuLiveFile {
   final CpuLiveFileKind kind;
   final bool canChange;
   final String label;
+  final int? directorySfi;
 
   bool get isDirectory => kind == CpuLiveFileKind.directory;
   bool get supportsBinary =>
@@ -43,13 +72,27 @@ class CpuLiveFile {
     this.recordLength,
     this.recordCount,
     this.canChange,
-    this.label,
+    this.label, {
+    this.directorySfi,
+  });
+
+  factory CpuLiveFile.directoryRecords() => CpuLiveFile._(
+    Uint8List(0),
+    CpuLiveFileKind.record,
+    null,
+    null,
+    null,
+    null,
+    null,
+    false,
+    '',
   );
 
   factory CpuLiveFile.fromSelect(
     Uint8List control, {
     required bool directory,
     required bool typedSelection,
+    bool readOnly = false,
     int? fid,
     Uint8List? aid,
   }) {
@@ -73,6 +116,12 @@ class CpuLiveFile {
     final actualFid = field(0x83);
     final id = actualFid?.length == 2 ? _cpuFileInt(actualFid!) : null;
     final name = firstField(fci, 0x84) ?? field(0x84);
+    final proprietary = firstField(fci, 0xA5);
+    final sfiByte = firstField(proprietary, 0x88);
+    final sfi =
+        sfiByte?.length == 1 && sfiByte!.single >= 1 && sfiByte.single <= 30
+        ? sfiByte.single
+        : null;
     final dfName = name != null && name.length >= 5 && name.length <= 16
         ? name
         : null;
@@ -95,16 +144,22 @@ class CpuLiveFile {
             descriptor.length <= 6
         ? _cpuFileInt(descriptor.sublist(4))
         : null;
+    final namedPaymentDirectory =
+        fid == 0x3F00 && cpuIsPaymentDirectoryName(dfName);
     return CpuLiveFile._(
       control,
       kind ?? (directory ? CpuLiveFileKind.directory : CpuLiveFileKind.unknown),
-      id ?? fid,
+      namedPaymentDirectory ? null : id ?? fid,
       directory ? dfName ?? aid : null,
       size,
       recordLength == 0 ? null : recordLength,
       count,
-      typedSelection || kind != null,
-      cpuDirectoryLabel(firstField(firstField(fci, 0xA5), 0x50) ?? field(0x50)),
+      !readOnly &&
+          !namedPaymentDirectory &&
+          !cpuIsPaymentDirectoryName(dfName) &&
+          (typedSelection || kind != null),
+      cpuDirectoryLabel(firstField(proprietary, 0x50) ?? field(0x50)),
+      directorySfi: sfi,
     );
   }
 }
@@ -182,13 +237,26 @@ class CpuCardAccess {
   final Future<Uint8List> Function(Uint8List) exchange;
   CpuCardAccess(this.exchange);
 
-  Future<CpuFileReply> _send(List<int> apdu, {bool reading = false}) async {
+  Future<CpuFileReply> _send(
+    List<int> apdu, {
+    bool reading = false,
+    bool mutation = false,
+  }) async {
     // Follow GET RESPONSE when needed; this never repeats a write or VERIFY.
+    int? firstStatus;
     final response = CpuFileReply(
-      await exchangeCpuApdu(Uint8List.fromList(apdu), exchange),
+      await exchangeCpuApdu(Uint8List.fromList(apdu), (command) async {
+        final reply = await exchange(command);
+        if (reply.length >= 2)
+          firstStatus ??= reply[reply.length - 2] << 8 | reply.last;
+        return reply;
+      }),
     );
     if (response.status != 0x9000 && !(reading && response.status == 0x6282)) {
-      throw CpuFileStatus(response.status);
+      throw CpuFileStatus(
+        response.status,
+        originalRejected: !mutation || firstStatus == response.status,
+      );
     }
     return response;
   }
@@ -198,6 +266,7 @@ class CpuCardAccess {
     List<int> name, {
     required bool directory,
     bool typedSelection = true,
+    bool readOnly = false,
     int? fid,
     Uint8List? aid,
   }) async {
@@ -219,6 +288,7 @@ class CpuCardAccess {
       response.data,
       directory: directory,
       typedSelection: typedSelection,
+      readOnly: readOnly,
       fid: fid,
       aid: aid,
     );
@@ -228,9 +298,9 @@ class CpuCardAccess {
       _select(0x00, _fid(0x3F00), directory: true, fid: 0x3F00);
   Future<CpuLiveFile> selectParent() =>
       _select(0x03, const [], directory: true);
-  Future<CpuLiveFile> selectAid(Uint8List aid) {
+  Future<CpuLiveFile> selectAid(Uint8List aid, {bool readOnly = false}) {
     RangeError.checkValueInInterval(aid.length, 5, 16, 'AID length');
-    return _select(0x04, aid, directory: true, aid: aid);
+    return _select(0x04, aid, directory: true, aid: aid, readOnly: readOnly);
   }
 
   /// Type 4 EF selection uses the NFC Forum short SELECT without FCI.
@@ -300,7 +370,14 @@ class CpuCardAccess {
 
   Future<CpuFileReply> updateBinary(int offset, Uint8List data) {
     _binaryBounds(offset, data.length, 255);
-    return _send([0x00, 0xD6, offset >> 8, offset & 255, data.length, ...data]);
+    return _send([
+      0x00,
+      0xD6,
+      offset >> 8,
+      offset & 255,
+      data.length,
+      ...data,
+    ], mutation: true);
   }
 
   void _binaryBounds(int offset, int length, int limit) {
@@ -313,16 +390,68 @@ class CpuCardAccess {
     );
   }
 
-  Future<CpuFileReply> readRecord(int number, int length) {
+  Future<CpuFileReply> readRecord(int number, int length, {int sfi = 0}) {
     RangeError.checkValueInInterval(number, 1, 254, 'Record');
     RangeError.checkValueInInterval(length, 1, 256, 'Length');
-    return _send([0x00, 0xB2, number, 0x04, length & 255], reading: true);
+    RangeError.checkValueInInterval(sfi, 0, 30, 'SFI');
+    return _send([
+      0x00,
+      0xB2,
+      number,
+      sfi << 3 | 0x04,
+      length & 255,
+    ], reading: true);
   }
 
   Future<CpuFileReply> updateRecord(int number, Uint8List data) {
     RangeError.checkValueInInterval(number, 1, 254, 'Record');
     RangeError.checkValueInInterval(data.length, 1, 255, 'Length');
-    return _send([0x00, 0xDC, number, 0x04, data.length, ...data]);
+    return _send([
+      0x00,
+      0xDC,
+      number,
+      0x04,
+      data.length,
+      ...data,
+    ], mutation: true);
+  }
+
+  /// ISO 7816 CHANGE REFERENCE DATA (old PIN followed by new PIN). Use an
+  /// explicit P2 and a fixed field size; some cards have their own protocol.
+  Future<CpuFileReply> changePin(
+    int reference,
+    CpuPinEncoding encoding,
+    String current,
+    String next,
+  ) async {
+    RangeError.checkValueInInterval(reference, 0, 255, 'PIN reference');
+    final old = cpuVerifyData(current, encoding);
+    final replacement = cpuVerifyData(next, encoding);
+    if (old.length != replacement.length) {
+      throw const FormatException(
+        'The PIN fields must have the same byte length',
+      );
+    }
+    final command = Uint8List.fromList([
+      0,
+      0x24,
+      0,
+      reference,
+      old.length + replacement.length,
+      ...old,
+      ...replacement,
+    ]);
+    try {
+      final raw = await exchange(command);
+      final status = cpuAuthStatus(raw);
+      if (status != 0x9000)
+        throw CpuFileStatus(status, originalRejected: status >> 8 != 0x61);
+      return CpuFileReply(raw);
+    } finally {
+      old.fillRange(0, old.length, 0);
+      replacement.fillRange(0, replacement.length, 0);
+      command.fillRange(5, command.length, 0);
+    }
   }
 
   Future<CpuFileReply> createFile(
@@ -384,14 +513,14 @@ class CpuCardAccess {
       0x62,
       params.length,
       ...params,
-    ]);
+    ], mutation: true);
   }
 
   Future<CpuFileReply> deleteFile(int fid) {
     if (fid == 0 || fid == 0x3F00 || fid == 0x3FFF || fid == 0xFFFF) {
       throw ArgumentError.value(fid, 'FID');
     }
-    return _send([0x00, 0xE4, 0x00, 0x00, 2, ..._fid(fid)]);
+    return _send([0x00, 0xE4, 0x00, 0x00, 2, ..._fid(fid)], mutation: true);
   }
 
   /// Read EF.DIR, which must already be selected; regular records and binary

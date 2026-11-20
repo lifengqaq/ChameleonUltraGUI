@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
 import 'package:chameleonultragui/gui/menu/tools/cpu_directory_view.dart';
 import 'package:chameleonultragui/helpers/cpu_card_access.dart';
+import 'package:chameleonultragui/helpers/cpu_auth.dart';
 import 'package:chameleonultragui/helpers/cpu_directory.dart';
 import 'package:chameleonultragui/helpers/iso14443_4.dart';
 import 'package:flutter/material.dart';
@@ -141,6 +142,7 @@ void main() {
         ('00A40200022F0000', '620782010283022F009000'),
         ('00B2010400', '61144F05F010203040500341707051063F00501510019000'),
         ('00B2020400', '6A83'),
+        ('00A404000E315041592E5359532E444446303100', '6A82'),
         (
           '00A404000E325041592E5359532E444446303100',
           '6F0EA50CBF0C0961074F05F0102030409000',
@@ -160,6 +162,7 @@ void main() {
       final root = scan.tree.childrenOf(null);
       expect(root.map((entry) => entry.address.display), [
         '3F00',
+        'AID 325041592E5359532E4444463031',
         'AID D2760000850101',
       ]);
       final app = scan.tree.childrenOf(CpuFileAddress([0x5015])).single;
@@ -187,6 +190,7 @@ void main() {
         ('00A40000023F0000', '9000'),
         ('00A40200022F0000', '620782010183022F009000'),
         ('00B0000000', '6982'),
+        ('00A404000E315041592E5359532E444446303100', '6A82'),
         (
           '00A404000E325041592E5359532E444446303100',
           '6F0EA50CBF0C0961074F05F0102030409000',
@@ -196,11 +200,119 @@ void main() {
       ]);
       final scan = await discoverCpuDirectory(CpuCardAccess(script.transmit));
       expect(scan.cardStatuses, {'EF.DIR': 0x6982});
-      expect(scan.tree.childrenOf(null).last.address.display, 'AID F010203040');
+      expect(
+        scan.tree
+            .childrenOf(CpuFileAddress([], aid: cpuPpseName.codeUnits))
+            .single
+            .address
+            .aid,
+        cpuHex('F010203040'),
+      );
       expect(scan.tree.at(CpuFileAddress([0x2F00]))?.label, 'EF.DIR');
       script.done();
     },
   );
+
+  test('screenshot PSE FCI leads to SFI records and a nested DDF', () async {
+    const response = '6F15840E315041592E5359532E4444463031A5038801019000';
+    final script = _CardScript([
+      ('00A40000023F0000', response),
+      ('00B2010C00', '700961079D05F0010203049000'),
+      ('00B2020C00', '6A83'),
+      ('00A4040005F00102030400', '6F0C8405F001020304A5038801029000'),
+      ('00B2011400', '700E610C4F05F01234567850034170709000'),
+      (
+        '00B2021400',
+        '700961079D05F0010203049000',
+      ), // cycle: this DDF already visited
+      ('00B2031400', '6A83'),
+      ('00A404000E325041592E5359532E444446303100', '6A82'),
+      ('00A4040007D276000085010100', '6A82'),
+      ('00A40000023F0000', response),
+    ]);
+    final scan = await discoverCpuDirectory(CpuCardAccess(script.transmit));
+    expect(scan.master?.fid, isNull);
+    expect(scan.master?.canChange, isFalse);
+    final root = scan.tree.childrenOf(null).single;
+    expect(root.label, 'PSE');
+    final children = scan.tree.childrenOf(root.address);
+    expect(children.last.address.sfi, 1);
+    expect(children.last.address.fid, isNull);
+    final nested = scan.tree.childrenOf(children.first.address);
+    expect(nested.first.label, 'App');
+    expect(nested.last.address.sfi, 2);
+    expect(scan.selectedAddress?.display, root.address.display);
+    script.done();
+  });
+
+  test(
+    'credential choice follows a denied operation and retries only once',
+    () async {
+      final script = _CardScript([
+        ('00B0000001', '6982'),
+        ('00B0000001', '6982'),
+        ('00B0000001', '6982'),
+        ('00D600000101', '6100'),
+        ('00C0000000', '6982'),
+        ('00B0000001', '019000'),
+      ]);
+      final card = CpuCardAccess(script.transmit);
+      var offered = 0;
+      Future<CpuFileReply> run(
+        Future<CpuFileReply> Function() send,
+        bool useKey,
+      ) => runCpuFileOperation(
+        send,
+        authorize: () async {
+          offered++;
+          return useKey;
+        },
+      );
+      await expectLater(
+        run(() => card.readBinary(0, 1), false),
+        throwsA(isA<CpuFileStatus>()),
+      );
+      expect(offered, 1);
+      await expectLater(
+        run(() => card.readBinary(0, 1), true),
+        throwsA(isA<CpuFileStatus>()),
+      );
+      expect(offered, 2);
+      await expectLater(
+        run(() => card.updateBinary(0, Uint8List.fromList([1])), true),
+        throwsA(
+          isA<CpuFileStatus>().having(
+            (e) => e.originalRejected,
+            'write rejected',
+            false,
+          ),
+        ),
+      );
+      expect((await run(() => card.readBinary(0, 1), true)).data, [1]);
+      expect(offered, 2);
+      script.done();
+    },
+  );
+
+  test('ISO PIN change sends the specified reference and never retries on rejection', () async {
+    final script = _CardScript([('00240081083132333435363738', '63C1')]);
+    final card = CpuCardAccess(script.transmit);
+    await expectLater(
+      card.changePin(0x81, CpuPinEncoding.ascii, '1234', '56789'),
+      throwsFormatException,
+    );
+    await expectLater(
+      card.changePin(0x81, CpuPinEncoding.ascii, '1234', '5678'),
+      throwsA(
+        isA<CpuFileStatus>().having(
+          (e) => e.word,
+          'remaining attempts status',
+          0x63C1,
+        ),
+      ),
+    );
+    script.done();
+  });
 
   test(
     'rejects a different FID and keeps generic untyped selection read-only',

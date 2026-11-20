@@ -37,11 +37,22 @@ class CpuAuthResult {
 /// Counts only come from a failed VERIFY/EXTERNAL AUTHENTICATE response.
 /// No VERIFY-without-data, GET DATA 9F17 or speculative counter commands.
 class CpuAuthHistory {
-  final Map<String, CpuAuthResult> _results = {};
+  final Map<String, CpuAuthResult> _results;
+  final String _scope;
+  CpuAuthHistory() : _results = {}, _scope = '';
+  CpuAuthHistory._(this._results, this._scope);
+  CpuAuthHistory inDirectory(String directory) =>
+      CpuAuthHistory._(_results, directory);
+
+  // For ISO reference bytes, b8 distinguishes the current DF from the global
+  // reference. Keep the same retry history across files in a directory.
+  String _id(CpuAuthSettings settings) => settings.reference & 0x80 == 0
+      ? settings.counterId
+      : '$_scope/${settings.counterId}';
   CpuAuthResult? forSettings(CpuAuthSettings settings) =>
-      _results[settings.counterId];
+      _results[_id(settings)];
   void record(CpuAuthSettings settings, CpuAuthResult result) {
-    if (result.attempted) _results[settings.counterId] = result;
+    if (result.attempted || result.blocked) _results[_id(settings)] = result;
   }
 
   void clear() => _results.clear();

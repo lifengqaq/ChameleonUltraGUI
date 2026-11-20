@@ -9,11 +9,13 @@ class CpuDirectoryView extends StatefulWidget {
   final CpuDirectoryTree tree;
   final CpuFileAddress? selected;
   final ValueChanged<CpuDirectoryEntry>? onOpen;
+  final void Function(CpuDirectoryEntry, Offset)? onContextMenu;
   const CpuDirectoryView({
     super.key,
     required this.tree,
     this.selected,
     this.onOpen,
+    this.onContextMenu,
   });
 
   @override
@@ -48,28 +50,37 @@ class _CpuDirectoryViewState extends State<CpuDirectoryView> {
       if (size != null) l.cpu_tree_capacity(size),
     ].join(' · ');
     return [
-      ListTile(
+      GestureDetector(
         key: ValueKey('cpu-directory:$id'),
-        dense: true,
-        contentPadding: EdgeInsetsDirectional.only(
-          start: 8.0 + 18 * math.min(depth, 4),
-        ),
-        leading: Icon(
-          entry.isDirectory
-              ? Icons.folder_outlined
-              : Icons.insert_drive_file_outlined,
-        ),
-        title: Text(title, maxLines: 2, overflow: TextOverflow.ellipsis),
-        subtitle: Text(details, maxLines: 2, overflow: TextOverflow.ellipsis),
-        selected: widget.selected?.display == id,
-        onTap: widget.onOpen == null ? null : () => widget.onOpen!(entry),
-        trailing: children.isEmpty
+        behavior: HitTestBehavior.opaque,
+        onSecondaryTapUp: widget.onContextMenu == null
             ? null
-            : IconButton(
-                tooltip: expanded ? l.cpu_tree_collapse : l.cpu_tree_expand,
-                icon: Icon(expanded ? Icons.expand_less : Icons.expand_more),
-                onPressed: () => setState(() => _expanded[id] = !expanded),
-              ),
+            : (details) => widget.onContextMenu!(entry, details.globalPosition),
+        onLongPressStart: widget.onContextMenu == null
+            ? null
+            : (details) => widget.onContextMenu!(entry, details.globalPosition),
+        child: ListTile(
+          dense: true,
+          contentPadding: EdgeInsetsDirectional.only(
+            start: 8.0 + 18 * math.min(depth, 4),
+          ),
+          leading: Icon(
+            entry.isDirectory
+                ? Icons.folder_outlined
+                : Icons.insert_drive_file_outlined,
+          ),
+          title: Text(title, maxLines: 2, overflow: TextOverflow.ellipsis),
+          subtitle: Text(details, maxLines: 2, overflow: TextOverflow.ellipsis),
+          selected: widget.selected?.display == id,
+          onTap: widget.onOpen == null ? null : () => widget.onOpen!(entry),
+          trailing: children.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: expanded ? l.cpu_tree_collapse : l.cpu_tree_expand,
+                  icon: Icon(expanded ? Icons.expand_less : Icons.expand_more),
+                  onPressed: () => setState(() => _expanded[id] = !expanded),
+                ),
+        ),
       ),
       if (expanded)
         for (final child in children) ..._entry(l, child, depth + 1),

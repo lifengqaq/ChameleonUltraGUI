@@ -161,7 +161,7 @@ class _CpuCardMenuState extends State<CpuCardMenu> {
         rethrow;
       }
       final pair = CpuApduPair(command, response);
-      if (command[1] == 0x20 || command[1] == 0x82) {
+      if (const [0x20, 0x24, 0x2C, 0x82].contains(command[1])) {
         _append('Authentication APDU [redacted], SW ${pair.statusWord.toRadixString(16)}');
         if (pair.statusWord != 0x9000) break;
         continue;

@@ -3,47 +3,71 @@ import 'dart:typed_data';
 
 import 'package:chameleonultragui/helpers/cpu_card_access.dart';
 import 'package:chameleonultragui/helpers/cpu_dump.dart' show cpuFindTlv;
+import 'package:chameleonultragui/helpers/iso14443_4.dart' show exchangeCpuApdu;
 
 const cpuType4Aid = [0xD2, 0x76, 0, 0, 0x85, 1, 1];
 const cpuType4CcFid = 0xE103;
-const _ppse = [
-  0x32,
-  0x50,
-  0x41,
-  0x59,
-  0x2E,
-  0x53,
-  0x59,
-  0x53,
-  0x2E,
-  0x44,
-  0x44,
-  0x46,
-  0x30,
-  0x31,
-];
 
 /// An unambiguous address: a path under MF, or under a named application.
 /// Never infer a parent from an FCI's FID alone.
 class CpuFileAddress {
   final List<int> path;
   final List<int>? aid;
-  const CpuFileAddress.master() : path = const [], aid = null;
-  CpuFileAddress(List<int> path, {List<int>? aid})
-    : path = List.unmodifiable(path),
-      aid = aid == null ? null : List.unmodifiable(aid);
+  final CpuFileAddress? _branch;
+  final int? sfi;
+  final bool metadataOnly;
+  const CpuFileAddress.master()
+    : path = const [],
+      aid = null,
+      _branch = null,
+      sfi = null,
+      metadataOnly = false;
+  CpuFileAddress(
+    List<int> path, {
+    List<int>? aid,
+    CpuFileAddress? branch,
+    this.metadataOnly = false,
+  }) : path = List.unmodifiable(path),
+       aid = aid == null ? null : List.unmodifiable(aid),
+       _branch = branch,
+       sfi = null;
+  CpuFileAddress.directoryRecords(CpuFileAddress parent, int this.sfi)
+    : _branch = parent,
+      path = const [],
+      aid = null,
+      metadataOnly = true;
 
-  int? get fid => path.lastOrNull ?? (aid == null ? 0x3F00 : null);
+  int? get fid =>
+      sfi == null ? path.lastOrNull ?? (aid == null ? 0x3F00 : null) : null;
   CpuFileAddress? get parent => path.isEmpty
-      ? null
-      : CpuFileAddress(path.sublist(0, path.length - 1), aid: aid);
-  CpuFileAddress child(int fid) => CpuFileAddress([...path, fid], aid: aid);
+      ? _branch
+      : CpuFileAddress(
+          path.sublist(0, path.length - 1),
+          aid: aid,
+          branch: _branch,
+          metadataOnly: metadataOnly,
+        );
+  CpuFileAddress child(int fid) => CpuFileAddress(
+    [...path, fid],
+    aid: aid,
+    branch: _branch,
+    metadataOnly: metadataOnly,
+  );
   String get display => [
-    aid == null ? '3F00' : 'AID ${cpuAidHex(aid!)}',
+    if (_branch != null) _branch.display,
+    if (sfi != null)
+      entryLabel
+    else if (aid == null)
+      '3F00'
+    else
+      'AID ${cpuAidHex(aid!)}',
     ...path.map(cpuFidHex),
   ].join('/');
-  String get entryLabel =>
-      fid != null ? 'FID ${cpuFidHex(fid!)}' : 'AID ${cpuAidHex(aid!)}';
+  String get entryLabel => sfi != null
+      ? 'SFI ${sfi.toString().padLeft(2, '0')}'
+      : fid != null
+      ? 'FID ${cpuFidHex(fid!)}'
+      : 'AID ${cpuAidHex(aid!)}';
 
   Future<CpuLiveFile> open(
     CpuCardAccess card, {
@@ -51,10 +75,22 @@ class CpuFileAddress {
     bool type4 = false,
     CpuFileAddress? selectedDirectory,
   }) async {
+    if (sfi != null) {
+      if (parent!.display != selectedDirectory?.display) {
+        await parent!.open(card, directory: true);
+      }
+      return CpuLiveFile.directoryRecords();
+    }
     if (path.isEmpty) {
-      return aid == null
-          ? card.selectMaster()
-          : card.selectAid(Uint8List.fromList(aid!));
+      if (aid != null)
+        return card.selectAid(Uint8List.fromList(aid!), readOnly: metadataOnly);
+      final file = await card.selectMaster();
+      if (cpuIsPaymentDirectoryName(file.aid)) {
+        throw const FormatException(
+          'The card returned a payment directory in place of MF',
+        );
+      }
+      return file;
     }
     if (parent!.display == selectedDirectory?.display) {
       return type4
@@ -71,7 +107,7 @@ class CpuFileAddress {
       }
     }
     if (aid == null) {
-      await card.selectMaster();
+      await const CpuFileAddress.master().open(card, directory: true);
     } else {
       await card.selectAid(Uint8List.fromList(aid!));
       if (path.length > 1) {
@@ -109,7 +145,7 @@ class CpuDirectoryEntry {
   });
 
   bool get isDirectory => kind == CpuLiveFileKind.directory;
-  bool get isMaster => address.path.isEmpty && address.aid == null;
+  bool get isMaster => address.fid == 0x3F00 && address.parent == null;
 }
 
 class CpuDirectoryTree {
@@ -194,13 +230,135 @@ class CpuDirectoryScan {
   final CpuDirectoryTree tree;
   final Map<String, int> cardStatuses;
   final CpuLiveFile? master;
+  final CpuFileAddress? selectedAddress;
   final bool incomplete;
   const CpuDirectoryScan(
     this.tree,
     this.cardStatuses,
     this.master,
-    this.incomplete,
-  );
+    this.incomplete, {
+    this.selectedAddress,
+  });
+}
+
+class _DirectoryBudget implements Exception {
+  const _DirectoryBudget();
+}
+
+typedef _PaymentDirectoryItem = ({Uint8List name, String label, bool nested});
+
+Iterable<_PaymentDirectoryItem> _paymentItems(
+  Uint8List data, {
+  bool record = false,
+}) sync* {
+  final containers = record ? cpuFindTlv(data, 0x70, recursive: false) : [data];
+  for (final container in containers) {
+    for (final app in cpuFindTlv(container, 0x61, recursive: false)) {
+      final aid = _field(app, 0x4F), ddfName = _field(app, 0x9D);
+      final name = aid ?? ddfName;
+      if (name == null ||
+          name.length < 5 ||
+          name.length > 16 ||
+          (aid != null && ddfName != null))
+        continue;
+      yield (
+        name: name,
+        label: cpuDirectoryLabel(_field(app, 0x50)),
+        nested: ddfName != null,
+      );
+    }
+  }
+}
+
+/// Follow only directory definitions (9D) and only their declared SFI. ADFs
+/// are listed by AID, without running GPO or trying to enumerate payments data.
+Future<bool> _walkPaymentDirectory(
+  CpuCardAccess card,
+  CpuDirectoryTree tree,
+  Map<String, int> statuses,
+  CpuFileAddress root,
+  CpuLiveFile rootFile, {
+  bool records = true,
+}) async {
+  final seen = <String>{};
+  var partial = false;
+  Future<void> walk(CpuFileAddress address, CpuLiveFile file, int depth) async {
+    if (!seen.add(cpuAidHex(address.aid!))) return;
+    if (depth > 5 || seen.length > 24) {
+      partial = true;
+      return;
+    }
+    final children = <String, _PaymentDirectoryItem>{};
+    void addAll(Iterable<_PaymentDirectoryItem> items) {
+      for (final item in items) {
+        if (children.length >= 32) {
+          partial = true;
+          break;
+        }
+        children.putIfAbsent(cpuAidHex(item.name), () => item);
+      }
+    }
+
+    final inline = _field(_field(_field(file.control, 0x6F), 0xA5), 0xBF0C);
+    if (inline != null) addAll(_paymentItems(inline));
+    final sfi = records ? file.directorySfi : null;
+    if (sfi != null) {
+      final shortFile = CpuFileAddress.directoryRecords(address, sfi);
+      tree.add(CpuDirectoryEntry(shortFile, kind: CpuLiveFileKind.record));
+      for (var record = 1; record <= 24; record++) {
+        try {
+          final reply = await card.readRecord(record, 256, sfi: sfi);
+          addAll(_paymentItems(reply.data, record: true));
+          if (reply.status == 0x6282) break;
+          if (record == 24) partial = true;
+        } on CpuFileStatus catch (error) {
+          if (error.word != 0x6A83) statuses[shortFile.display] = error.word;
+          break;
+        }
+      }
+    }
+    for (final item in children.values) {
+      if (item.nested && seen.contains(cpuAidHex(item.name))) continue;
+      if (tree.applicationAddress(item.name) != null && !item.nested) continue;
+      final child = CpuFileAddress(
+        [],
+        aid: item.name,
+        branch: address,
+        metadataOnly: true,
+      );
+      tree.add(
+        CpuDirectoryEntry(
+          child,
+          kind: CpuLiveFileKind.directory,
+          label: item.label,
+          applicationAid: item.name,
+        ),
+      );
+      if (!item.nested || !records) continue;
+      if (depth >= 5 || seen.length >= 24) {
+        partial = true;
+        continue;
+      }
+      try {
+        await walk(
+          child,
+          await card.selectAid(item.name, readOnly: true),
+          depth + 1,
+        );
+      } on CpuFileStatus catch (error) {
+        statuses[child.display] = error.word;
+      } on FormatException {
+        partial = true;
+      }
+    }
+  }
+
+  try {
+    await walk(root, rootFile, 0);
+  } on _DirectoryBudget {
+    return true;
+  }
+  return partial;
 }
 
 /// Read directory metadata only: no authentication, guessed FIDs, payment
@@ -225,13 +383,20 @@ Future<CpuDirectoryScan> discoverCpuDirectory(CpuCardAccess card) async {
 
   const master = CpuFileAddress.master();
   final selectedMaster = await probe('MF', card.selectMaster);
-  final dir = await probe(
-    'EF.DIR',
-    () => selectedMaster != null
-        ? card.selectFile(0x2F00, directory: false)
-        : card.selectPath([0x2F00], directory: false),
-  );
-  if (selectedMaster != null || dir != null) {
+  final defaultPse =
+      selectedMaster != null && cpuIsPaymentDirectoryName(selectedMaster.aid)
+      ? selectedMaster
+      : null;
+  final actualMaster = defaultPse == null ? selectedMaster : null;
+  final dir = defaultPse != null
+      ? null
+      : await probe(
+          'EF.DIR',
+          () => actualMaster != null
+              ? card.selectFile(0x2F00, directory: false)
+              : card.selectPath([0x2F00], directory: false),
+        );
+  if (actualMaster != null || dir != null) {
     tree.add(
       const CpuDirectoryEntry(
         master,
@@ -252,15 +417,42 @@ Future<CpuDirectoryScan> discoverCpuDirectory(CpuCardAccess card) async {
     );
     addApps(await probe('EF.DIR', () => card.readApplicationEntries(dir)));
   }
-  final ppse = await probe(
-    'PPSE',
-    () => card.selectAid(Uint8List.fromList(_ppse)),
-  );
-  if (ppse != null) {
-    final fci = _field(ppse.control, 0x6F);
-    final advertised = _field(_field(fci, 0xA5), 0xBF0C);
-    if (advertised != null)
-      addApps(cpuDirectoryApplications([advertised], allowPath: false));
+  var remaining = 80;
+  final boundedCard = CpuCardAccess((command) {
+    if (remaining-- <= 0) throw const _DirectoryBudget();
+    return card.exchange(command);
+  });
+  for (final (name, label) in [(cpuPseName, 'PSE'), (cpuPpseName, 'PPSE')]) {
+    final aid = Uint8List.fromList(name.codeUnits);
+    final current =
+        defaultPse != null && cpuAidHex(defaultPse.aid!) == cpuAidHex(aid)
+        ? defaultPse
+        : null;
+    final file =
+        current ??
+        await probe(label, () => card.selectAid(aid, readOnly: true));
+    if (file == null) continue;
+    final address = CpuFileAddress([], aid: aid, metadataOnly: true);
+    // Reuse an EF.DIR entry in place if it already had this AID.
+    final known = tree.applicationAddress(aid);
+    if (known != null && known.display != address.display) tree.remove(known);
+    tree.add(
+      CpuDirectoryEntry(
+        address,
+        kind: CpuLiveFileKind.directory,
+        label: label,
+        applicationAid: aid,
+      ),
+    );
+    final stopped = await _walkPaymentDirectory(
+      boundedCard,
+      tree,
+      statuses,
+      address,
+      file,
+      records: name == cpuPseName,
+    );
+    incomplete |= stopped;
   }
   final ndef = await probe(
     'NDEF',
@@ -306,14 +498,23 @@ Future<CpuDirectoryScan> discoverCpuDirectory(CpuCardAccess card) async {
     }
   }
 
-  final restored = selectedMaster == null
+  var restored = actualMaster == null && defaultPse == null
       ? null
       : await probe('MF', card.selectMaster);
+  CpuFileAddress? initial = restored == null ? null : master;
+  if (restored != null && cpuIsPaymentDirectoryName(restored.aid)) {
+    initial = CpuFileAddress([], aid: restored.aid, metadataOnly: true);
+    if (tree.at(initial) == null) {
+      restored = null;
+      initial = null;
+    }
+  }
   return CpuDirectoryScan(
     tree,
     Map.unmodifiable(statuses),
     restored,
     incomplete,
+    selectedAddress: initial,
   );
 }
 
