@@ -52,6 +52,13 @@ class _Card extends ChameleonCommunicator {
     ('00A4040007D276000085010100', '6A82'),
     ('00A40000023F0000', _directoryFci),
   ];
+  static const _emptyPseScan = <(String, String)>[
+    ('00A40000023F0000', _directoryFci),
+    ('00B2010C00', '6A82'),
+    ('00A404000E325041592E5359532E444446303100', '6A82'),
+    ('00A4040007D276000085010100', '6A82'),
+    ('00A40000023F0000', _directoryFci),
+  ];
   final List<(String, String)> script;
   int exchanges = 0;
 
@@ -108,6 +115,68 @@ Future<AppLocalizations> _openExplorer(WidgetTester tester, _Card card) async {
 }
 
 void main() {
+  testWidgets('creates the first DF under a verified MF with a PSE name', (
+    tester,
+  ) async {
+    const actualMf =
+        '6F1A840E315041592E5359532E4444463031620883023F00820238219000';
+    final card = _Card([
+      ..._Card._emptyPseScan,
+      ('00A40000023F0000', _directoryFci),
+      ('00A40004023F0000', _directoryFci),
+      ('00A40004023F00', '6A86'),
+      ('00A4000000', actualMf),
+      ('00E000000A62088202382183021100', '9000'),
+    ]);
+    final l = await _openExplorer(tester, card);
+    final ok = find.widgetWithText(FilledButton, l.ok);
+    await tester.tap(
+      find.widgetWithText(OutlinedButton, l.cpu_manage_new_directory),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextFormField>(find.byType(TextFormField)).initialValue,
+      '3F00',
+    );
+    await tester.tap(ok);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextFormField).first, '1100');
+    await tester.tap(ok);
+    await tester.pumpAndSettle();
+    expect(card.exchanges, card.script.length - 1);
+    await tester.tap(ok);
+    await tester.pumpAndSettle();
+    expect(find.text('FID 1100'), findsOneWidget);
+    expect(card.exchanges, card.script.length);
+  });
+
+  testWidgets('explains an unverified MF and never creates in the PSE', (
+    tester,
+  ) async {
+    final card = _Card([
+      ..._Card._emptyPseScan,
+      ('00A40000023F0000', _directoryFci),
+      ('00A40004023F0000', '9000'),
+      ('00A40004023F00', '6A86'),
+      ('00A4000000', _directoryFci),
+    ]);
+    final l = await _openExplorer(tester, card);
+    await tester.tap(
+      find.widgetWithText(OutlinedButton, l.cpu_manage_new_directory),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, l.ok));
+    await tester.pumpAndSettle();
+    expect(find.text(l.cpu_manage_master_unverified), findsOneWidget);
+    expect(
+      find.text(l.cpu_manage_master_alias('1PAY.SYS.DDF01')),
+      findsOneWidget,
+    );
+    expect(find.text(l.cpu_manage_master_need_parent), findsOneWidget);
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(card.exchanges, card.script.length);
+  });
+
   testWidgets(
     'queries City Union balance separately and displays a real zero',
     (tester) async {

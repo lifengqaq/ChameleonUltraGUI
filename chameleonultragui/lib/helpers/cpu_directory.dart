@@ -125,27 +125,7 @@ class CpuFileAddress {
           return fallback;
         }
       }
-      final CpuLiveFile file;
-      try {
-        file = await card.selectMaster();
-      } on CpuFileStatus catch (error) {
-        if (!preferFcp ||
-            !const [0x6A82, 0x6A86, 0x6A81, 0x6700].contains(error.word))
-          rethrow;
-        final master = await card.selectVerifiedMaster();
-        if (master == null) rethrow;
-        return master;
-      }
-      if (cpuIsPaymentDirectoryName(file.aid)) {
-        if (preferFcp) {
-          final master = await card.selectVerifiedMaster();
-          if (master != null) return master;
-        }
-        throw const FormatException(
-          'The card returned a payment directory in place of MF',
-        );
-      }
-      return file;
+      return card.openMasterForAccess();
     }
     if (parent!.display == selectedDirectory?.display) {
       return type4
@@ -509,10 +489,12 @@ Future<CpuDirectoryScan> discoverCpuDirectory(
   const master = CpuFileAddress.master();
   final selectedMaster = await probe('MF', card.selectMaster);
   final defaultPse =
-      selectedMaster != null && cpuIsPaymentDirectoryName(selectedMaster.aid)
+      selectedMaster != null &&
+          !selectedMaster.isMaster &&
+          cpuIsPaymentDirectoryName(selectedMaster.aid)
       ? selectedMaster
       : null;
-  final actualMaster = defaultPse == null ? selectedMaster : null;
+  final actualMaster = selectedMaster?.isMaster == true ? selectedMaster : null;
   if (actualMaster != null) onSelect?.call(master, actualMaster);
   final dir = defaultPse != null
       ? null
@@ -653,9 +635,12 @@ Future<CpuDirectoryScan> discoverCpuDirectory(
       ? null
       : await probe('MF', card.selectMaster);
   CpuFileAddress? initial = restored == null ? null : master;
-  if (restored != null && cpuIsPaymentDirectoryName(restored.aid)) {
-    initial = CpuFileAddress([], aid: restored.aid, metadataOnly: true);
-    if (tree.at(initial) == null) {
+  if (restored != null && !restored.isMaster) {
+    final name = restored.aid;
+    initial = name == null
+        ? null
+        : CpuFileAddress([], aid: name, metadataOnly: true);
+    if (initial == null || tree.at(initial) == null) {
       restored = null;
       initial = null;
     }

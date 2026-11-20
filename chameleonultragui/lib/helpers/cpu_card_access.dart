@@ -26,6 +26,12 @@ class CpuFileStatus implements Exception {
   const CpuFileStatus(this.word, {this.originalRejected = true});
 }
 
+class CpuMasterUnavailable implements Exception {
+  final CpuLiveFile? observed;
+  final int? status;
+  const CpuMasterUnavailable({this.observed, this.status});
+}
+
 /// The card must reject the original operation with 6982 before asking for a
 /// credential. A successful, user-approved authentication authorizes one retry.
 Future<T> runCpuFileOperation<T>(
@@ -67,6 +73,12 @@ class CpuLiveFile {
   final bool canChange;
   final String label;
   final int? directorySfi;
+  int? get reportedFid {
+    final value = controlFields[0x83];
+    return value?.length == 2 ? _cpuFileInt(value!) : null;
+  }
+
+  bool get isMaster => isDirectory && fid == 0x3F00;
   int? get descriptor => controlFields[0x82]?.firstOrNull;
   bool get fixedRecordLength =>
       kind == CpuLiveFileKind.record &&
@@ -185,19 +197,21 @@ class CpuLiveFile {
             descriptor.length <= 6
         ? _cpuFileInt(descriptor.sublist(4))
         : null;
-    final namedPaymentDirectory =
-        fid == 0x3F00 && cpuIsPaymentDirectoryName(dfName);
+    // Some COSes answer a SELECT of 3F00 with a default application's name.
+    // The requested FID alone cannot resolve that conflict.
+    final ambiguousMaster = fid == 0x3F00 && dfName != null && id == null;
+    final confirmedMaster = fid == 0x3F00 && id == fid;
     return CpuLiveFile._(
       control,
       kind ?? (directory ? CpuLiveFileKind.directory : CpuLiveFileKind.unknown),
-      namedPaymentDirectory ? null : id ?? fid,
+      ambiguousMaster ? null : id ?? fid,
       directory ? dfName ?? aid : null,
       size,
       recordLength == 0 ? null : recordLength,
       count,
       !readOnly &&
-          !namedPaymentDirectory &&
-          !cpuIsPaymentDirectoryName(dfName) &&
+          !ambiguousMaster &&
+          (confirmedMaster || !cpuIsPaymentDirectoryName(dfName)) &&
           (flags == null || flags & 0xB8 != 0x08 && flags & 0xBF != 0x39) &&
           (typedSelection || kind != null),
       cpuDirectoryLabel(firstField(proprietary, 0x50) ?? field(0x50)),
@@ -349,26 +363,48 @@ class CpuCardAccess {
   Future<CpuLiveFile> selectMaster() =>
       _select(0x00, _fid(0x3F00), directory: true, fid: 0x3F00);
 
-  /// A card can alias the default selection to a named application. FCP
-  /// alone establishes a real MF only when it actually returns FID 3F00.
-  Future<CpuLiveFile?> selectVerifiedMaster() async {
-    for (final withLe in [true, false]) {
+  /// Resolve an explicit request for the MF. If the initial SELECT was
+  /// ambiguous, an alternative must report the FID, not just return SW 9000.
+  Future<CpuLiveFile> openMasterForAccess() async {
+    CpuLiveFile? observed;
+    int? status;
+    bool canTryVariant(int word) =>
+        _selectVariantRejected(word) || word == 0x6A87;
+    try {
+      final file = await selectMaster();
+      if (file.isMaster) return file;
+      observed = file;
+    } on CpuFileStatus catch (error) {
+      if (!canTryVariant(error.word)) rethrow;
+      status = error.word;
+    } on FormatException {
+      // A contradictory reported FID cannot establish the MF.
+    }
+    for (final (name, p2, withLe) in [
+      (_fid(0x3F00), 4, true),
+      (_fid(0x3F00), 4, false),
+      (const <int>[], 0, true),
+    ]) {
       try {
         final file = await _select(
           0,
-          _fid(0x3F00),
+          name,
           directory: true,
-          response: 4,
+          response: p2,
           withLe: withLe,
+          fid: 0x3F00,
         );
-        if (file.fid == 0x3F00 && !cpuIsPaymentDirectoryName(file.aid))
-          return file;
-        return null;
+        if (file.reportedFid == 0x3F00) return file;
+        if (file.aid != null) observed ??= file;
       } on CpuFileStatus catch (error) {
-        if (!_selectVariantRejected(error.word)) rethrow;
+        if (!canTryVariant(error.word)) rethrow;
+        status ??= error.word;
+      } on FormatException {
+        // Continue through read-only selection forms, without treating this
+        // response as a valid parent.
       }
     }
-    return null;
+    throw CpuMasterUnavailable(observed: observed, status: status);
   }
 
   Future<CpuLiveFile> selectParent() =>

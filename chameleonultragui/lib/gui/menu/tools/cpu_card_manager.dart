@@ -79,6 +79,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   CpuDirectoryTree _tree = CpuDirectoryTree();
   CpuLiveArchive _archive = CpuLiveArchive();
   CpuDirectoryScan? _directoryScan;
+  CpuMasterUnavailable? _masterIssue;
   CpuFileAddress? _missingSelection;
   final _missingAids = <String>{};
   CpuFileReply? _lastRead;
@@ -127,6 +128,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     _directory = null;
     _address = null;
     _missingSelection = null;
+    _masterIssue = null;
     _directoryAddress = null;
     _lastRead = null;
     _purseBalance = null;
@@ -239,7 +241,9 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     } catch (error) {
       if (!mounted) return;
       final l = _l;
+      if (error is CpuMasterUnavailable) setState(() => _masterIssue = error);
       final message = switch (error) {
+        CpuMasterUnavailable() => l.cpu_manage_master_unverified,
         CpuFileStatus(:final word) => _status(word),
         CpuSessionEnded() ||
         CpuCommandError(status: 0x76) => l.cpu_manage_session_lost,
@@ -309,11 +313,8 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   }
 
   Future<void> _openMaster() => _select(
-    (card) => const CpuFileAddress.master().open(
-      card,
-      directory: true,
-      preferFcp: true,
-    ),
+    (card) => card.openMasterForAccess(),
+    address: const CpuFileAddress.master(),
   );
 
   Future<void> _select(
@@ -422,11 +423,12 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     String? title,
     String? help,
     bool preview = true,
+    String initialPath = '',
   }) async {
     final l = _l;
     final path = await _prompt(
       title ?? (directory ? l.cpu_manage_open_df : l.cpu_manage_open_ef),
-      [_Field(l.cpu_manage_path)],
+      [_Field(l.cpu_manage_path, initial: initialPath)],
       (values) {
         final parts = values.single.split('/').map(_readFid).toList();
         if (parts.length > 17 ||
@@ -647,17 +649,6 @@ class _CpuCardManagerState extends State<CpuCardManager> {
       _showRead(reply, index: 0, record: false);
     });
     _message(_status(reply.status));
-  }
-
-  Future<void> _openRoot() async {
-    final entry =
-        _tree.at(const CpuFileAddress.master()) ??
-        _tree.childrenOf(null).firstOrNull;
-    if (entry == null) {
-      await _openMaster();
-    } else {
-      await _openEntry(entry);
-    }
   }
 
   Future<void> _openParent() async {
@@ -977,6 +968,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         directory: true,
         title: l.cpu_manage_choose_parent,
         help: l.cpu_manage_new_directory_target_help,
+        initialPath: '3F00',
       ))
         return;
       if (!_canCreateHere) throw StateError(l.cpu_manage_no_create_target);
@@ -1843,7 +1835,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                 IconButton(
                   icon: const Icon(Icons.home_outlined),
                   tooltip: l.cpu_tree_root,
-                  onPressed: _busy ? null : () => _run(_openRoot),
+                  onPressed: _busy ? null : () => _run(_openMaster),
                 ),
                 PopupMenuButton<_Command>(
                   tooltip: l.cpu_tree_manual,
@@ -1883,7 +1875,14 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                   CpuDirectoryView(
                     tree: _tree,
                     selected: _address ?? _missingSelection,
-                    missingAids: _missingAids,
+                    missingAids: {
+                      ..._missingAids,
+                      if (scan != null)
+                        for (final issue in scan.cardStatuses.entries)
+                          if (issue.value == 0x6A82 &&
+                              issue.key.contains('/SFI '))
+                            issue.key,
+                    },
                     onOpen: _busy
                         ? null
                         : (entry) => _run(() => _openEntry(entry)),
@@ -2094,6 +2093,42 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     }
   }
 
+  List<Widget> _masterDetails(AppLocalizations l, CpuMasterUnavailable issue) {
+    final observed = issue.observed;
+    final name = observed?.aid;
+    return [
+      if (name != null)
+        Text(
+          l.cpu_manage_master_alias(
+            cpuIsPaymentDirectoryName(name)
+                ? String.fromCharCodes(name)
+                : cpuAidHex(name),
+          ),
+        ),
+      if (issue.status case final word?) Text(_status(word)),
+      Text(l.cpu_manage_master_need_parent),
+      const SizedBox(height: 8),
+      Wrap(
+        spacing: 8,
+        runSpacing: 4,
+        children: [
+          _button(
+            Icons.folder_open,
+            l.cpu_manage_open_known_fid,
+            () => _run(() => _chooseFile(true)),
+          ),
+          _button(Icons.apps, l.cpu_manage_select_aid, () => _run(_chooseAid)),
+        ],
+      ),
+      if (observed != null && observed.control.isNotEmpty)
+        ExpansionTile(
+          title: const Text('FCI / FCP'),
+          tilePadding: EdgeInsets.zero,
+          children: _controlSummary(l, observed),
+        ),
+    ];
+  }
+
   Widget _dataPane(AppLocalizations l, double actionHeight) {
     final file = _file, address = _address, read = _lastRead;
     final actions = file == null ? <_FileAction>[] : _actionsFor(file);
@@ -2150,7 +2185,9 @@ class _CpuCardManagerState extends State<CpuCardManager> {
               padding: const EdgeInsets.all(14),
               children: [
                 if (file == null) ...[
-                  if (_missingSelection case final missing?) ...[
+                  if (_masterIssue case final issue?)
+                    ..._masterDetails(l, issue)
+                  else if (_missingSelection case final missing?) ...[
                     Text(
                       missing.display,
                       style: Theme.of(context).textTheme.titleSmall,
