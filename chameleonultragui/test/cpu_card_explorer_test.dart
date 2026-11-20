@@ -153,12 +153,13 @@ void main() {
   testWidgets('explains an unverified MF and never creates in the PSE', (
     tester,
   ) async {
+    const otherFci = '6F15840E315041592E5359532E4444463031A5038801029000';
     final card = _Card([
       ..._Card._emptyPseScan,
-      ('00A40000023F0000', _directoryFci),
+      ('00A40000023F0000', otherFci),
       ('00A40004023F0000', '9000'),
       ('00A40004023F00', '6A86'),
-      ('00A4000000', _directoryFci),
+      ('00A4000000', otherFci),
     ]);
     final l = await _openExplorer(tester, card);
     await tester.tap(
@@ -173,9 +174,58 @@ void main() {
       findsOneWidget,
     );
     expect(find.text(l.cpu_manage_master_need_parent), findsOneWidget);
+    expect(find.text(l.cpu_manage_fmcos_open), findsNothing);
     expect(find.byType(AlertDialog), findsNothing);
     expect(card.exchanges, card.script.length);
   });
+
+  testWidgets(
+    'opts into the documented FMCOS root then creates one confirmed DF',
+    (tester) async {
+      final card = _Card([
+        ..._Card._emptyPseScan,
+        ('00A40000023F0000', _directoryFci),
+        ('00A40004023F0000', '6A86'),
+        ('00A40004023F00', '6A86'),
+        ('00A4000000', _directoryFci),
+        ('00A40000023F00', _directoryFci),
+        ('80E011000D380200F0F195FFFF5445535431', '9000'),
+        ('00A40000023F00', _directoryFci),
+        ('00A40000021100', '6F0984055445535431A5009000'),
+      ]);
+      final l = await _openExplorer(tester, card);
+      final ok = find.widgetWithText(FilledButton, l.ok);
+      await tester.tap(find.byTooltip(l.cpu_tree_root));
+      await tester.pumpAndSettle();
+      expect(find.text(l.cpu_manage_master_unverified), findsOneWidget);
+      await tester.tap(
+        find.widgetWithText(OutlinedButton, l.cpu_manage_fmcos_open),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(l.cpu_manage_fmcos_selected), findsOneWidget);
+      final afterSelect = card.exchanges;
+      await tester.tap(
+        find.widgetWithText(OutlinedButton, l.cpu_manage_new_directory),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.text(l.cpu_manage_fmcos_create),
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(ok);
+      await tester.pumpAndSettle();
+      expect(card.exchanges, afterSelect);
+      await tester.tap(ok);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('FID 1100'));
+      await tester.pumpAndSettle();
+      expect(card.exchanges, card.script.length);
+      expect(find.text('3F00/1100 · AID 54 45 53 54 31'), findsOneWidget);
+    },
+  );
 
   testWidgets(
     'queries City Union balance separately and displays a real zero',

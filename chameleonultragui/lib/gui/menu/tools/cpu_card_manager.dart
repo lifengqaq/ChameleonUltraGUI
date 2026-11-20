@@ -80,6 +80,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   CpuLiveArchive _archive = CpuLiveArchive();
   CpuDirectoryScan? _directoryScan;
   CpuMasterUnavailable? _masterIssue;
+  bool _fmcosMode = false;
   CpuFileAddress? _missingSelection;
   final _missingAids = <String>{};
   CpuFileReply? _lastRead;
@@ -140,6 +141,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
 
   void _forgetSession() {
     _link = null;
+    _fmcosMode = false;
     _forgetSelection();
   }
 
@@ -226,7 +228,10 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   CpuCardAccess get _card {
     final link = _link;
     if (link == null) throw StateError(_l.cpu_manage_session_lost);
-    return CpuCardAccess((apdu) => _transmit(link, apdu));
+    return CpuCardAccess(
+      (apdu) => _transmit(link, apdu),
+      useFmcosMaster: _fmcosMode,
+    );
   }
 
   Future<void> _run(Future<void> Function() operation) async {
@@ -317,6 +322,15 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     address: const CpuFileAddress.master(),
   );
 
+  Future<void> _openFmcosMaster() async {
+    await _select(
+      (card) => card.openFmcosMaster(),
+      address: const CpuFileAddress.master(),
+    );
+    if (mounted && _file?.isFmcosMaster == true)
+      setState(() => _fmcosMode = true);
+  }
+
   Future<void> _select(
     Future<CpuLiveFile> Function(CpuCardAccess) select, {
     bool relative = false,
@@ -375,8 +389,8 @@ class _CpuCardManagerState extends State<CpuCardManager> {
           CpuDirectoryEntry(
             location,
             kind: file.kind,
-            label: file.label,
-            applicationAid: file.aid,
+            label: file.isMaster ? 'MF' : file.label,
+            applicationAid: file.isMaster ? null : file.aid,
           ),
         );
         final sfi = file.directorySfi;
@@ -977,6 +991,11 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   }
 
   Future<void> _create(CpuLiveFileKind kind) async {
+    if (_file?.isFmcosMaster == true) {
+      if (kind == CpuLiveFileKind.directory)
+        await _createFmcosDirectory(_file!);
+      return;
+    }
     final l = _l;
     final title = _createLabel(kind);
     final dir = kind == CpuLiveFileKind.directory;
@@ -1038,6 +1057,67 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                 ),
               );
             },
+    );
+  }
+
+  Future<void> _createFmcosDirectory(CpuLiveFile parent) async {
+    final l = _l;
+    final title = l.cpu_manage_fmcos_create;
+    final input = await _prompt(
+      title,
+      [
+        _Field(l.cpu_manage_fid, initial: '1100'),
+        _Field(l.cpu_manage_fmcos_name, initial: '5445535431'),
+        _Field(l.cpu_manage_fmcos_space, initial: '512', number: true),
+        _Field(l.cpu_manage_fmcos_create_access, initial: 'F0'),
+        _Field(l.cpu_manage_fmcos_erase_access, initial: 'F1'),
+        _Field(l.cpu_manage_fmcos_app_file, initial: '95'),
+      ],
+      (values) {
+        final fid = _mutationFid(values[0]);
+        final name = cpuHex(values[1], min: 5, max: 16);
+        if (cpuIsPaymentDirectoryName(name)) throw const FormatException();
+        final size = _decimal(values[2], 1, 0xFFFE);
+        final permissions = [
+          for (final value in values.skip(3))
+            cpuHex(value, min: 1, max: 1).single,
+        ];
+        return (fid, name, size, permissions);
+      },
+      help: l.cpu_manage_fmcos_create_help,
+    );
+    if (input == null || !mounted) return;
+    final (fid, name, size, permissions) = input;
+    final address = const CpuFileAddress.master().child(fid);
+    await _mutate(
+      title,
+      [
+        'FID ${_hex(fid, 4)} · ${l.cpu_manage_bytes(size)}',
+        'DF: ${bytesToHexSpace(name)}',
+        '${l.cpu_manage_fmcos_create_access}: ${_hex(permissions[0], 2)}',
+        '${l.cpu_manage_fmcos_erase_access}: ${_hex(permissions[1], 2)}',
+        '${l.cpu_manage_fmcos_app_file}: ${_hex(permissions[2], 2)}',
+      ].join('\n'),
+      () => _card.createFmcosDirectory(
+        fid,
+        parent: parent,
+        size: size,
+        name: name,
+        createAccess: permissions[0],
+        eraseAccess: permissions[1],
+        applicationFileId: permissions[2],
+      ),
+      allowAuthentication: false,
+      directoryChange: true,
+      rejectionNote: (word) => word == 0x6A86 ? l.cpu_manage_file_exists : null,
+      onSuccess: () => _tree.add(
+        CpuDirectoryEntry(
+          address,
+          kind: CpuLiveFileKind.directory,
+          applicationAid: name,
+          capacity: size,
+        ),
+      ),
     );
   }
 
@@ -1132,6 +1212,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     CpuFileAddress? invalidate,
     bool invalidateSubtree = false,
     String? successDetail,
+    String? Function(int)? rejectionNote,
   }) async {
     final l = _l;
     if (!_active || _file == null) throw StateError(l.cpu_manage_session_lost);
@@ -1216,7 +1297,9 @@ class _CpuCardManagerState extends State<CpuCardManager> {
           problem: true,
         );
       } else {
-        rethrow;
+        final note = rejectionNote?.call(error.word);
+        if (note == null) rethrow;
+        _message('SW ${_hex(error.word, 4)} · $note', problem: true);
       }
     } on CpuSessionEnded {
       rethrow;
@@ -1470,6 +1553,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     required bool named,
     required bool hasCatalog,
     bool canRead = true,
+    bool fmcosMaster = false,
   }) {
     final l = _l;
     canChange = canChange && address?.metadataOnly != true;
@@ -1520,9 +1604,13 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         add(
           _Command.createDf,
           Icons.create_new_folder_outlined,
-          _createLabel(CpuLiveFileKind.directory),
+          fmcosMaster
+              ? l.cpu_manage_fmcos_create
+              : _createLabel(CpuLiveFileKind.directory),
           () => _create(CpuLiveFileKind.directory),
         );
+      }
+      if (canChange && named && !fmcosMaster) {
         add(
           _Command.createBinary,
           Icons.note_add_outlined,
@@ -1602,7 +1690,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         _deleteSelection,
       );
     }
-    if (canChange)
+    if (canChange && !fmcosMaster)
       add(
         _Command.changePin,
         Icons.password,
@@ -1621,6 +1709,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         !file.isInternalEf &&
         (_selectedEntry?.type4File?.readAccess ?? 0) == 0,
     named: file.fid != null || file.aid != null,
+    fmcosMaster: file.isFmcosMaster,
     hasCatalog:
         (_address?.sfi != null && _address?.shortBinary != true) ||
         (_address?.metadataOnly == true && file.directorySfi != null),
@@ -1642,6 +1731,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                     cpuAidHex(cpuType4Aid),
             canRead: (entry.type4File?.readAccess ?? 0) == 0,
             named: address.fid != null || address.aid != null,
+            fmcosMaster: entry.isMaster && _fmcosMode,
             hasCatalog:
                 (address.sfi != null && !address.shortBinary) ||
                 _tree
@@ -2096,6 +2186,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   List<Widget> _masterDetails(AppLocalizations l, CpuMasterUnavailable issue) {
     final observed = issue.observed;
     final name = observed?.aid;
+    final matchesFmcos = observed?.matchesFmcosMasterFci == true;
     return [
       if (name != null)
         Text(
@@ -2106,12 +2197,22 @@ class _CpuCardManagerState extends State<CpuCardManager> {
           ),
         ),
       if (issue.status case final word?) Text(_status(word)),
-      Text(l.cpu_manage_master_need_parent),
+      Text(
+        matchesFmcos
+            ? l.cpu_manage_fmcos_hint
+            : l.cpu_manage_master_need_parent,
+      ),
       const SizedBox(height: 8),
       Wrap(
         spacing: 8,
         runSpacing: 4,
         children: [
+          if (matchesFmcos)
+            _button(
+              Icons.home_outlined,
+              l.cpu_manage_fmcos_open,
+              () => _run(_openFmcosMaster),
+            ),
           _button(
             Icons.folder_open,
             l.cpu_manage_open_known_fid,
@@ -2210,6 +2311,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                   ] else
                     Text(l.cpu_tree_pick_entry),
                 ] else ...[
+                  if (file.isFmcosMaster) Text(l.cpu_manage_fmcos_selected),
                   if (_purseSelected) _pursePane(l),
                   if (_transitProfile case final profile?) ...[
                     CpuInfoRow(

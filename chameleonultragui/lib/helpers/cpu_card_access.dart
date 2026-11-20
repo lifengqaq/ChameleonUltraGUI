@@ -16,6 +16,34 @@ bool _selectVariantRejected(int status) =>
 const cpuPseName = '1PAY.SYS.DDF01';
 const cpuPpseName = '2PAY.SYS.DDF01';
 
+// ZLG600S user guide, FM1208 T=CL example: the documented SELECT by FID
+// returns only this FCI (plus SW), with no 83 file identifier.
+const _fmcosMasterFci = [
+  0x6F,
+  0x15,
+  0x84,
+  0x0E,
+  0x31,
+  0x50,
+  0x41,
+  0x59,
+  0x2E,
+  0x53,
+  0x59,
+  0x53,
+  0x2E,
+  0x44,
+  0x44,
+  0x46,
+  0x30,
+  0x31,
+  0xA5,
+  0x03,
+  0x88,
+  0x01,
+  0x01,
+];
+
 bool cpuIsPaymentDirectoryName(List<int>? name) =>
     name != null &&
     {cpuPseName, cpuPpseName}.contains(String.fromCharCodes(name));
@@ -73,6 +101,8 @@ class CpuLiveFile {
   final bool canChange;
   final String label;
   final int? directorySfi;
+  final bool isFmcosMaster;
+  bool get matchesFmcosMasterFci => _cpuBytesEqual(control, _fmcosMasterFci);
   int? get reportedFid {
     final value = controlFields[0x83];
     return value?.length == 2 ? _cpuFileInt(value!) : null;
@@ -127,6 +157,7 @@ class CpuLiveFile {
     this.canChange,
     this.label, {
     this.directorySfi,
+    this.isFmcosMaster = false,
   });
 
   factory CpuLiveFile.shortFile({bool binary = false}) => CpuLiveFile._(
@@ -294,7 +325,8 @@ List<CpuDirectoryApplication> cpuDirectoryApplications(
 /// ISO 7816 file operations on one already selected RF session, basic channel.
 class CpuCardAccess {
   final Future<Uint8List> Function(Uint8List) exchange;
-  CpuCardAccess(this.exchange);
+  final bool useFmcosMaster;
+  CpuCardAccess(this.exchange, {this.useFmcosMaster = false});
 
   Future<CpuFileReply> _send(
     List<int> apdu, {
@@ -366,6 +398,7 @@ class CpuCardAccess {
   /// Resolve an explicit request for the MF. If the initial SELECT was
   /// ambiguous, an alternative must report the FID, not just return SW 9000.
   Future<CpuLiveFile> openMasterForAccess() async {
+    if (useFmcosMaster) return openFmcosMaster();
     CpuLiveFile? observed;
     int? status;
     bool canTryVariant(int word) =>
@@ -405,6 +438,32 @@ class CpuCardAccess {
       }
     }
     throw CpuMasterUnavailable(observed: observed, status: status);
+  }
+
+  /// Explicit, session-local opt-in. Re-select by 3F00 using the documented
+  /// T=CL command; a SELECT by AID or a bare 9000 cannot enable this profile.
+  Future<CpuLiveFile> openFmcosMaster() async {
+    final file = await _select(
+      0,
+      _fid(0x3F00),
+      directory: true,
+      fid: 0x3F00,
+      withLe: false,
+    );
+    if (!file.matchesFmcosMasterFci) throw CpuMasterUnavailable(observed: file);
+    return CpuLiveFile._(
+      file.control,
+      CpuLiveFileKind.directory,
+      0x3F00,
+      file.aid,
+      file.size,
+      null,
+      null,
+      true,
+      file.label,
+      directorySfi: file.directorySfi,
+      isFmcosMaster: true,
+    );
   }
 
   Future<CpuLiveFile> selectParent() =>
@@ -468,6 +527,16 @@ class CpuCardAccess {
     bool preferFcp = false,
   }) async {
     final id = _fid(fid);
+    if (useFmcosMaster) {
+      return _select(
+        0,
+        id,
+        directory: directory,
+        fid: fid,
+        typedSelection: false,
+        withLe: false,
+      );
+    }
     if (preferFcp) {
       try {
         return await _select(
@@ -696,6 +765,49 @@ class CpuCardAccess {
       replacement.fillRange(0, replacement.length, 0);
       command.fillRange(5, command.length, 0);
     }
+  }
+
+  /// FMCOS 2.0 §7.13.3: create one child DF under the opened master file.
+  Future<CpuFileReply> createFmcosDirectory(
+    int fid, {
+    required CpuLiveFile parent,
+    required int size,
+    required int createAccess,
+    required int eraseAccess,
+    required int applicationFileId,
+    required Uint8List name,
+  }) {
+    if (!useFmcosMaster || !parent.isFmcosMaster) {
+      throw StateError('FMCOS parent must be selected');
+    }
+    if (const [0, 0x3F00, 0x3FFF, 0xFFFF].contains(fid)) {
+      throw ArgumentError.value(fid, 'FID');
+    }
+    RangeError.checkValueInInterval(size, 1, 0xFFFE, 'Directory space');
+    for (final value in [createAccess, eraseAccess, applicationFileId]) {
+      RangeError.checkValueInInterval(value, 0, 255, 'FMCOS byte');
+    }
+    RangeError.checkValueInInterval(name.length, 5, 16, 'DF name length');
+    if (cpuIsPaymentDirectoryName(name))
+      throw ArgumentError('Reserved DF name');
+    final data = [
+      0x38,
+      size >> 8,
+      size & 255,
+      createAccess,
+      eraseAccess,
+      applicationFileId,
+      0xFF,
+      0xFF,
+      ...name,
+    ];
+    return _send([
+      0x80,
+      0xE0,
+      ..._fid(fid),
+      data.length,
+      ...data,
+    ], mutation: true);
   }
 
   Future<CpuFileReply> createFile(
