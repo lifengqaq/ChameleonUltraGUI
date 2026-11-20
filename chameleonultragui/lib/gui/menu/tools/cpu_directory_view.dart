@@ -40,11 +40,16 @@ class _CpuDirectoryViewState extends State<CpuDirectoryView> {
         : entry.kind == CpuLiveFileKind.record
         ? 'EF · ${l.cpu_manage_record_kind}'
         : 'EF';
-    final title = entry.label.isEmpty ? address.entryLabel : entry.label;
+    final title = address.sfi != null
+        ? l.cpu_tree_record_file
+        : entry.label.isEmpty
+        ? address.entryLabel
+        : entry.label;
     final size = entry.capacity;
     final details = [
       entry.isMaster ? '3F00' : kind,
       if (!entry.isMaster && entry.label.isNotEmpty) address.entryLabel,
+      if (address.sfi != null) address.entryLabel,
       if (address.aid == null && entry.applicationAid != null)
         'AID ${cpuAidHex(entry.applicationAid!)}',
       if (size != null) l.cpu_tree_capacity(size),
@@ -56,7 +61,7 @@ class _CpuDirectoryViewState extends State<CpuDirectoryView> {
         onSecondaryTapUp: widget.onContextMenu == null
             ? null
             : (details) => widget.onContextMenu!(entry, details.globalPosition),
-        onLongPressStart: widget.onContextMenu == null
+        onLongPressEnd: widget.onContextMenu == null
             ? null
             : (details) => widget.onContextMenu!(entry, details.globalPosition),
         child: ListTile(
@@ -73,12 +78,40 @@ class _CpuDirectoryViewState extends State<CpuDirectoryView> {
           subtitle: Text(details, maxLines: 2, overflow: TextOverflow.ellipsis),
           selected: widget.selected?.display == id,
           onTap: widget.onOpen == null ? null : () => widget.onOpen!(entry),
-          trailing: children.isEmpty
+          trailing: children.isEmpty && widget.onContextMenu == null
               ? null
-              : IconButton(
-                  tooltip: expanded ? l.cpu_tree_collapse : l.cpu_tree_expand,
-                  icon: Icon(expanded ? Icons.expand_less : Icons.expand_more),
-                  onPressed: () => setState(() => _expanded[id] = !expanded),
+              : Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (children.isNotEmpty)
+                      IconButton(
+                        tooltip: expanded
+                            ? l.cpu_tree_collapse
+                            : l.cpu_tree_expand,
+                        icon: Icon(
+                          expanded ? Icons.expand_less : Icons.expand_more,
+                        ),
+                        onPressed: () =>
+                            setState(() => _expanded[id] = !expanded),
+                      ),
+                    if (widget.onContextMenu != null)
+                      Builder(
+                        builder: (buttonContext) => IconButton(
+                          icon: const Icon(Icons.more_vert),
+                          tooltip: l.cpu_tree_actions,
+                          onPressed: () {
+                            final button =
+                                buttonContext.findRenderObject()! as RenderBox;
+                            widget.onContextMenu!(
+                              entry,
+                              button.localToGlobal(
+                                Offset(0, button.size.height),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                  ],
                 ),
         ),
       ),

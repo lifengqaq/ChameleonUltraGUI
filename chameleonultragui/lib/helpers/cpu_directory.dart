@@ -82,8 +82,25 @@ class CpuFileAddress {
       return CpuLiveFile.directoryRecords();
     }
     if (path.isEmpty) {
-      if (aid != null)
-        return card.selectAid(Uint8List.fromList(aid!), readOnly: metadataOnly);
+      if (aid != null) {
+        try {
+          return await card.selectAid(
+            Uint8List.fromList(aid!),
+            readOnly: metadataOnly,
+          );
+        } on CpuFileStatus catch (error) {
+          if (_branch != null ||
+              !cpuIsPaymentDirectoryName(aid) ||
+              ![0x6A81, 0x6A82, 0x6A86, 0x6D00].contains(error.word))
+            rethrow;
+          // Some cards expose the PSE through the default selection only.
+          final fallback = await card.selectMaster();
+          if (fallback.aid == null ||
+              cpuAidHex(fallback.aid!) != cpuAidHex(aid!))
+            rethrow;
+          return fallback;
+        }
+      }
       final file = await card.selectMaster();
       if (cpuIsPaymentDirectoryName(file.aid)) {
         throw const FormatException(
@@ -224,6 +241,51 @@ class CpuDirectoryTree {
     );
     return address;
   }
+
+  /// Parse explicitly read directory records without opening any advertised ADF.
+  int addDirectoryRecords(
+    CpuFileAddress directory,
+    Iterable<Uint8List> records,
+  ) {
+    final seen = <String>{};
+    for (final record in records) {
+      for (final item in _paymentItems(record, record: true)) {
+        if (seen.length >= 32) return seen.length;
+        if (seen.add(cpuAidHex(item.name))) _addPaymentEntry(directory, item);
+      }
+    }
+    return seen.length;
+  }
+
+  CpuFileAddress? _addPaymentEntry(
+    CpuFileAddress parent,
+    _PaymentDirectoryItem item,
+  ) {
+    final name = cpuAidHex(item.name);
+    for (
+      CpuFileAddress? ancestor = parent;
+      ancestor != null;
+      ancestor = ancestor.parent
+    ) {
+      if (ancestor.aid != null && cpuAidHex(ancestor.aid!) == name) return null;
+    }
+    if (!item.nested && applicationAddress(item.name) != null) return null;
+    final child = CpuFileAddress(
+      [],
+      aid: item.name,
+      branch: parent,
+      metadataOnly: item.nested,
+    );
+    add(
+      CpuDirectoryEntry(
+        child,
+        kind: CpuLiveFileKind.directory,
+        label: item.label,
+        applicationAid: item.name,
+      ),
+    );
+    return child;
+  }
 }
 
 class CpuDirectoryScan {
@@ -319,22 +381,8 @@ Future<bool> _walkPaymentDirectory(
     }
     for (final item in children.values) {
       if (item.nested && seen.contains(cpuAidHex(item.name))) continue;
-      if (tree.applicationAddress(item.name) != null && !item.nested) continue;
-      final child = CpuFileAddress(
-        [],
-        aid: item.name,
-        branch: address,
-        metadataOnly: true,
-      );
-      tree.add(
-        CpuDirectoryEntry(
-          child,
-          kind: CpuLiveFileKind.directory,
-          label: item.label,
-          applicationAid: item.name,
-        ),
-      );
-      if (!item.nested || !records) continue;
+      final child = tree._addPaymentEntry(address, item);
+      if (child == null || !item.nested || !records) continue;
       if (depth >= 5 || seen.length >= 24) {
         partial = true;
         continue;

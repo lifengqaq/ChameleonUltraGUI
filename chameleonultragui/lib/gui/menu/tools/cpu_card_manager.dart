@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:chameleonultragui/bridge/chameleon.dart';
 import 'package:chameleonultragui/connector/serial_abstract.dart';
@@ -13,6 +14,7 @@ import 'package:chameleonultragui/gui/page/slot_manager.dart';
 import 'package:chameleonultragui/helpers/cpu_auth.dart';
 import 'package:chameleonultragui/helpers/cpu_card_access.dart';
 import 'package:chameleonultragui/helpers/cpu_directory.dart';
+import 'package:chameleonultragui/helpers/cpu_directory_record.dart';
 import 'package:chameleonultragui/helpers/definitions.dart';
 import 'package:chameleonultragui/helpers/general.dart';
 import 'package:chameleonultragui/helpers/iso14443_4.dart';
@@ -23,7 +25,30 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 typedef _Link = ({ChameleonCommunicator device, Uint8List id});
+
+enum _Command {
+  open,
+  openDf,
+  openEf,
+  parent,
+  readCatalog,
+  listApps,
+  readBinary,
+  readRecord,
+  updateBinary,
+  updateRecord,
+  createDf,
+  createBinary,
+  createRecords,
+  deleteChild,
+  deleteSelected,
+  changePin,
+}
+
+enum _ManagerTool { profiles, slots, apdu, radio }
+
 typedef _FileAction = ({
+  _Command command,
   IconData icon,
   String label,
   Future<void> Function() run,
@@ -45,8 +70,11 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   CpuDirectoryTree _tree = CpuDirectoryTree();
   CpuDirectoryScan? _directoryScan;
   CpuFileReply? _lastRead;
+  String? _previewError;
+  int _recordNumber = 1;
+  int _lastRecordInFile = 254;
   String? _notice;
-  bool _busy = false, _problem = false;
+  bool _busy = false, _problem = false, _menuOpen = false;
 
   AppLocalizations get _l => AppLocalizations.of(context)!;
   bool get _online =>
@@ -77,6 +105,9 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     _address = null;
     _directoryAddress = null;
     _lastRead = null;
+    _previewError = null;
+    _recordNumber = 1;
+    _lastRecordInFile = 254;
   }
 
   void _forgetSession() {
@@ -283,6 +314,15 @@ class _CpuCardManagerState extends State<CpuCardManager> {
             applicationAid: file.aid,
           ),
         );
+        final sfi = file.directorySfi;
+        if (location.metadataOnly && sfi != null) {
+          _tree.add(
+            CpuDirectoryEntry(
+              CpuFileAddress.directoryRecords(location, sfi),
+              kind: CpuLiveFileKind.record,
+            ),
+          );
+        }
       }
     });
     _message(_status(0x9000));
@@ -331,6 +371,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         address: CpuFileAddress(path.sublist(1)),
       );
     }
+    if (!directory) await _loadPreview();
   }
 
   Future<void> _discoverDirectory() async {
@@ -347,8 +388,14 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     });
   }
 
-  Future<void> _openEntry(CpuDirectoryEntry entry) async {
-    if (_address?.display == entry.address.display && _file != null) return;
+  Future<void> _openEntry(
+    CpuDirectoryEntry entry, {
+    bool preview = true,
+  }) async {
+    if (_address?.display == entry.address.display && _file != null) {
+      if (preview && _lastRead == null) await _loadPreview();
+      return;
+    }
     final parent = _directoryAddress;
     await _select(
       (card) => entry.address.open(
@@ -362,9 +409,101 @@ class _CpuCardManagerState extends State<CpuCardManager> {
       relative:
           parent != null && entry.address.parent?.display == parent.display,
     );
-    if (mounted && entry.address.sfi != null && _directoryAddress == null) {
-      setState(() => _directoryAddress = entry.address.parent);
+    if (preview) await _loadPreview();
+  }
+
+  Future<void> _loadPreview({int record = 1}) async {
+    final file = _file;
+    if (!mounted ||
+        !_active ||
+        file == null ||
+        ![CpuLiveFileKind.binary, CpuLiveFileKind.record].contains(file.kind))
+      return;
+    final isRecord = file.kind == CpuLiveFileKind.record;
+    final length = ((isRecord ? file.recordLength : file.size) ?? 256).clamp(
+      1,
+      256,
+    );
+    final card = _card;
+    setState(() {
+      _previewError = null;
+    });
+    try {
+      final response = isRecord
+          ? await card.readRecord(record, length, sfi: _address?.sfi ?? 0)
+          : await card.readBinary(0, length);
+      if (!mounted) return;
+      setState(() {
+        _recordNumber = record;
+        _lastRead = response;
+      });
+    } on CpuFileStatus catch (error) {
+      if (!mounted) return;
+      setState(() {
+        if (isRecord && error.word == 0x6A83 && record > _recordNumber) {
+          _lastRecordInFile = record - 1;
+        } else {
+          _recordNumber = record;
+          _lastRead = null;
+        }
+        _previewError = error.word == 0x6982
+            ? _l.cpu_tree_preview_protected
+            : _status(error.word);
+      });
     }
+  }
+
+  Future<void> _openRoot() async {
+    final entry =
+        _tree.at(const CpuFileAddress.master()) ??
+        _tree.childrenOf(null).firstOrNull;
+    if (entry == null) {
+      await _openMaster();
+    } else {
+      await _openEntry(entry);
+    }
+  }
+
+  Future<void> _openParent() async {
+    final parent = _address?.parent;
+    if (parent == null) return;
+    await _openEntry(
+      _tree.at(parent) ??
+          CpuDirectoryEntry(parent, kind: CpuLiveFileKind.directory),
+    );
+  }
+
+  Future<void> _parseDirectoryRecords() async {
+    final l = _l;
+    final address = _address!;
+    final scope = address.sfi == null ? address : address.parent!;
+    final sfi = address.sfi ?? _file!.directorySfi;
+    if (sfi == null) return;
+    final card = _card;
+    final (records, limited) = await _withAccess(
+      l.cpu_tree_parse_records,
+      () async {
+        final records = <Uint8List>[];
+        for (var number = 1; number <= 24; number++) {
+          try {
+            final reply = await card.readRecord(number, 256, sfi: sfi);
+            records.add(reply.data);
+            if (reply.status == 0x6282 || reply.data.isEmpty)
+              return (records, false);
+          } on CpuFileStatus catch (e) {
+            if (e.word == 0x6A83) return (records, false);
+            rethrow;
+          }
+        }
+        return (records, true);
+      },
+    );
+    if (!mounted) return;
+    var found = 0;
+    setState(() => found = _tree.addDirectoryRecords(scope, records));
+    _message(
+      limited ? l.cpu_tree_incomplete : l.cpu_tree_parsed_records(found),
+    );
   }
 
   Future<void> _readSelectedDirectory() async {
@@ -391,7 +530,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
       [
         _Field(
           record ? l.cpu_manage_record_number : l.cpu_manage_offset,
-          initial: record ? '1' : '0',
+          initial: record ? '$_recordNumber' : '0',
           number: true,
         ),
         _Field(
@@ -414,7 +553,10 @@ class _CpuCardManagerState extends State<CpuCardManager> {
       action: l.read,
     );
     if (request == null || !mounted) return;
-    setState(() => _lastRead = null);
+    setState(() {
+      _lastRead = null;
+      _previewError = null;
+    });
     final (index, length) = request;
     final card = _card;
     final sfi = _address?.sfi ?? 0;
@@ -424,7 +566,11 @@ class _CpuCardManagerState extends State<CpuCardManager> {
           ? card.readRecord(index, length, sfi: sfi)
           : card.readBinary(index, length),
     );
-    if (mounted) setState(() => _lastRead = response);
+    if (mounted)
+      setState(() {
+        _lastRead = response;
+        if (record) _recordNumber = index;
+      });
     _message(_status(response.status));
   }
 
@@ -438,7 +584,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
       [
         _Field(
           record ? l.cpu_manage_record_number : l.cpu_manage_offset,
-          initial: record ? '1' : '0',
+          initial: record ? '$_recordNumber' : '0',
           number: true,
         ),
         _Field(l.cpu_manage_update_data, multiline: true),
@@ -845,100 +991,224 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     _ => _l.cpu_manage_add_fixed_records,
   };
 
-  List<_FileAction> _actionsFor(CpuLiveFile file) {
+  List<_FileAction> _fileActions(
+    CpuLiveFileKind kind,
+    CpuFileAddress? address, {
+    required bool canChange,
+    required bool named,
+    required bool hasCatalog,
+  }) {
     final l = _l;
-    final address = _address;
-    final canChange = file.canChange && address?.metadataOnly != true;
+    canChange = canChange && address?.metadataOnly != true;
     final canDelete =
         canChange &&
-        address?.fid != null &&
-        address!.parent != null &&
-        ![0, 0x3F00, 0x3FFF, 0xFFFF].contains(address.fid);
+        address?.parent != null &&
+        address!.fid != null &&
+        !const [0, 0x3F00, 0x3FFF, 0xFFFF].contains(address.fid);
     final actions = <_FileAction>[];
-    void add(IconData icon, String label, Future<void> Function() run) =>
-        actions.add((icon: icon, label: label, run: run));
-    if (file.isDirectory) {
-      if (canChange && (file.fid != null || file.aid != null)) {
-        for (final kind in [
-          CpuLiveFileKind.directory,
-          CpuLiveFileKind.binary,
-          CpuLiveFileKind.record,
-        ]) {
-          add(Icons.add, _createLabel(kind), () => _create(kind));
-        }
-        add(Icons.delete_outline, l.cpu_manage_delete_child, _deleteChild);
+    void add(
+      _Command command,
+      IconData icon,
+      String label,
+      Future<void> Function() run,
+    ) => actions.add((command: command, icon: icon, label: label, run: run));
+    if (address?.parent != null) {
+      add(
+        _Command.parent,
+        Icons.arrow_upward,
+        l.cpu_manage_parent,
+        _openParent,
+      );
+    }
+    if (hasCatalog) {
+      add(
+        _Command.readCatalog,
+        Icons.account_tree_outlined,
+        l.cpu_tree_parse_records,
+        _parseDirectoryRecords,
+      );
+    }
+    if (kind == CpuLiveFileKind.directory) {
+      if (address?.metadataOnly != true) {
+        add(
+          _Command.openDf,
+          Icons.folder_open,
+          l.cpu_manage_open_df,
+          () => _chooseFile(true),
+        );
+        add(
+          _Command.openEf,
+          Icons.insert_drive_file_outlined,
+          l.cpu_manage_open_ef,
+          () => _chooseFile(false),
+        );
+      }
+      if (canChange && named) {
+        add(
+          _Command.createDf,
+          Icons.create_new_folder_outlined,
+          _createLabel(CpuLiveFileKind.directory),
+          () => _create(CpuLiveFileKind.directory),
+        );
+        add(
+          _Command.createBinary,
+          Icons.note_add_outlined,
+          _createLabel(CpuLiveFileKind.binary),
+          () => _create(CpuLiveFileKind.binary),
+        );
+        add(
+          _Command.createRecords,
+          Icons.playlist_add,
+          _createLabel(CpuLiveFileKind.record),
+          () => _create(CpuLiveFileKind.record),
+        );
+        add(
+          _Command.deleteChild,
+          Icons.delete_outline,
+          l.cpu_manage_delete_child,
+          _deleteChild,
+        );
       }
     } else {
-      if (address?.display == '3F00/2F00')
-        add(Icons.list_alt, l.cpu_manage_list_apps, _readSelectedDirectory);
-      if (file.supportsBinary)
+      if (address?.display == '3F00/2F00') {
         add(
+          _Command.listApps,
+          Icons.list_alt,
+          l.cpu_manage_list_apps,
+          _readSelectedDirectory,
+        );
+      }
+      if (kind == CpuLiveFileKind.binary || kind == CpuLiveFileKind.unknown) {
+        add(
+          _Command.readBinary,
           Icons.download,
           l.cpu_manage_read_binary,
           () => _read(record: false),
         );
-      if (file.supportsRecords)
+      }
+      if (kind == CpuLiveFileKind.record || kind == CpuLiveFileKind.unknown) {
         add(
+          _Command.readRecord,
           Icons.download,
           l.cpu_manage_read_record,
           () => _read(record: true),
         );
-      if (canChange && file.kind == CpuLiveFileKind.binary) {
+      }
+      if (canChange && kind == CpuLiveFileKind.binary) {
         add(
+          _Command.updateBinary,
           Icons.edit_outlined,
           l.cpu_manage_write_binary,
           () => _write(record: false),
         );
       }
-      if (canChange && file.kind == CpuLiveFileKind.record) {
+      if (canChange && kind == CpuLiveFileKind.record) {
         add(
+          _Command.updateRecord,
           Icons.edit_outlined,
           l.cpu_manage_write_record,
           () => _write(record: true),
         );
       }
     }
-    if (canDelete)
-      add(Icons.delete_outline, l.cpu_manage_delete_selected, _deleteSelection);
-    if (canChange) add(Icons.password, l.cpu_manage_change_pin, _changePin);
+    if (canDelete) {
+      add(
+        _Command.deleteSelected,
+        Icons.delete_outline,
+        l.cpu_manage_delete_selected,
+        _deleteSelection,
+      );
+    }
+    if (canChange)
+      add(
+        _Command.changePin,
+        Icons.password,
+        l.cpu_manage_change_pin,
+        _changePin,
+      );
     return actions;
   }
 
-  Future<void> _entryMenu(CpuDirectoryEntry entry, Offset position) =>
-      _run(() async {
-        await _openEntry(entry);
-        final file = _file;
-        if (!mounted || !_active || file == null) return;
-        final actions = _actionsFor(file);
-        final overlay =
-            Overlay.of(context).context.findRenderObject()! as RenderBox;
-        final selected = await showMenu<_FileAction>(
-          context: context,
-          position: RelativeRect.fromSize(
-            overlay.globalToLocal(position) & Size.zero,
-            overlay.size,
+  List<_FileAction> _actionsFor(CpuLiveFile file) => _fileActions(
+    file.kind,
+    _address,
+    canChange: file.canChange,
+    named: file.fid != null || file.aid != null,
+    hasCatalog:
+        _address?.sfi != null ||
+        (_address?.metadataOnly == true && file.directorySfi != null),
+  );
+
+  Future<void> _entryMenu(CpuDirectoryEntry entry, Offset position) async {
+    if (_busy || _menuOpen || !_active) return;
+    final link = _link;
+    final address = entry.address;
+    final isSelected = _address?.display == address.display && _file != null;
+    final actions = isSelected
+        ? _actionsFor(_file!)
+        : _fileActions(
+            entry.kind,
+            address,
+            canChange: !entry.type4,
+            named: address.fid != null || address.aid != null,
+            hasCatalog:
+                address.sfi != null ||
+                _tree
+                    .childrenOf(address)
+                    .any((child) => child.address.sfi != null),
+          );
+    final overlay =
+        Navigator.of(context).overlay!.context.findRenderObject()! as RenderBox;
+    _menuOpen = true;
+    _Command? command;
+    try {
+      command = await showMenu<_Command>(
+        context: context,
+        position: RelativeRect.fromSize(
+          overlay.globalToLocal(position) & Size.zero,
+          overlay.size,
+        ),
+        items: [
+          PopupMenuItem(
+            value: _Command.open,
+            child: _menuLabel(
+              Icons.visibility_outlined,
+              _l.cpu_tree_open_entry,
+            ),
           ),
-          items: [
-            if (actions.isEmpty)
-              PopupMenuItem<_FileAction>(
-                enabled: false,
-                child: Text(_l.cpu_manage_no_actions),
-              ),
-            for (final action in actions)
-              PopupMenuItem(
-                value: action,
-                child: ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                  leading: Icon(action.icon),
-                  title: Text(action.label),
-                ),
-              ),
-          ],
-        );
-        if (selected != null && mounted && _active && _file == file)
-          await selected.run();
-      });
+          for (final action in actions)
+            PopupMenuItem(
+              value: action.command,
+              child: _menuLabel(action.icon, action.label),
+            ),
+        ],
+      );
+    } finally {
+      _menuOpen = false;
+    }
+    if (command == null || !mounted || !_active || _link != link) return;
+    await _run(() async {
+      await _openEntry(entry, preview: command == _Command.open);
+      if (!mounted || !_active || _file == null || command == _Command.open)
+        return;
+      final action = _actionsFor(_file!)
+          .where((item) => item.command == command)
+          .firstOrNull;
+      if (action == null) {
+        _message(_l.cpu_manage_no_actions, problem: true);
+      } else {
+        await action.run();
+      }
+    });
+  }
+
+  Widget _menuLabel(IconData icon, String label) => Row(
+    children: [
+      Icon(icon, size: 18),
+      const SizedBox(width: 12),
+      Flexible(child: Text(label)),
+    ],
+  );
 
   Widget _button(IconData icon, String title, VoidCallback? run) =>
       OutlinedButton.icon(
@@ -947,262 +1217,481 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         onPressed: run == null || _busy ? null : run,
       );
 
-  Widget _section(String title, List<Widget> children) => Card(
-    child: Padding(
-      padding: const EdgeInsets.all(16),
+  Future<void> _chooseTool(_ManagerTool tool) async {
+    if (_busy) return;
+    switch (tool) {
+      case _ManagerTool.profiles:
+        await _run(() => _openTool(const CpuProfilesPage()));
+      case _ManagerTool.slots:
+        await _run(() => _openTool(const SlotManagerPage()));
+      case _ManagerTool.apdu:
+        await _run(() => _openTool(const CpuCardMenu(), dialog: true));
+      case _ManagerTool.radio:
+        await showDialog<void>(
+          context: context,
+          builder: (dialog) => AlertDialog(
+            title: Text(_l.cpu_radio_details),
+            content: SizedBox(
+              width: 360,
+              child: SingleChildScrollView(
+                child: CpuIdentityPanel(identity: _identity),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialog),
+                child: Text(_l.close),
+              ),
+            ],
+          ),
+        );
+    }
+  }
+
+  Widget _connectionBar(AppLocalizations l) {
+    final active = _active, online = _online, identity = _identity;
+    final status = active
+        ? l.cpu_manage_session_active
+        : online
+        ? l.cpu_manage_session_idle
+        : l.raw_ultra_required;
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            FilledButton.icon(
+              icon: Icon(active ? Icons.refresh : Icons.contactless),
+              label: Text(
+                active ? l.cpu_manage_reselect : l.cpu_manage_connect,
+              ),
+              onPressed: online && !_busy
+                  ? () => _run(() async {
+                      if (active) await _disconnect();
+                      if (mounted) await _connect();
+                    })
+                  : null,
+            ),
+            _button(
+              Icons.power_settings_new,
+              l.cpu_disconnect,
+              active ? () => _run(_disconnect) : null,
+            ),
+            _button(
+              Icons.save_outlined,
+              l.save_only_uid,
+              identity == null ? null : () => _run(_saveIdentity),
+            ),
+            Text(
+              identity == null
+                  ? status
+                  : 'UID ${bytesToHexSpace(identity.uid)} · $status',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _treePane(AppLocalizations l) {
+    final scan = _directoryScan;
+    return Card(
+      margin: EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
-        spacing: 10,
         children: [
-          Text(title, style: Theme.of(context).textTheme.titleMedium),
-          ...children,
+          Padding(
+            padding: const EdgeInsetsDirectional.fromSTEB(12, 6, 8, 4),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    l.cpu_tree_title,
+                    style: Theme.of(context).textTheme.titleMedium,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh),
+                  tooltip: l.cpu_tree_refresh,
+                  onPressed: _busy ? null : () => _run(_discoverDirectory),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.home_outlined),
+                  tooltip: l.cpu_tree_root,
+                  onPressed: _busy ? null : () => _run(_openRoot),
+                ),
+                PopupMenuButton<_Command>(
+                  tooltip: l.cpu_tree_manual,
+                  enabled: !_busy,
+                  icon: const Icon(Icons.search),
+                  onSelected: (command) => _run(
+                    command == _Command.open
+                        ? _chooseAid
+                        : () => _chooseFile(command == _Command.openDf),
+                  ),
+                  itemBuilder: (_) => [
+                    PopupMenuItem(
+                      value: _Command.open,
+                      child: Text(l.cpu_manage_select_aid),
+                    ),
+                    PopupMenuItem(
+                      value: _Command.openDf,
+                      child: Text(l.cpu_manage_open_df),
+                    ),
+                    PopupMenuItem(
+                      value: _Command.openEf,
+                      child: Text(l.cpu_manage_open_ef),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: ListView(
+              primary: false,
+              key: const PageStorageKey('cpu-explorer-tree-scroll'),
+              padding: const EdgeInsets.fromLTRB(6, 6, 6, 12),
+              children: [
+                if (!_tree.isEmpty)
+                  CpuDirectoryView(
+                    tree: _tree,
+                    selected: _address,
+                    onOpen: _busy
+                        ? null
+                        : (entry) => _run(() => _openEntry(entry)),
+                    onContextMenu: _busy ? null : _entryMenu,
+                  ),
+                if (scan != null &&
+                    (_tree.isEmpty ||
+                        (_tree.childrenOf(null).length == 1 &&
+                            _tree.childrenOf(null).single.isMaster &&
+                            _tree
+                                .childrenOf(const CpuFileAddress.master())
+                                .isEmpty)))
+                  Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Text(l.cpu_tree_no_entries),
+                  ),
+                if (scan?.incomplete == true)
+                  Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Text(l.cpu_tree_incomplete),
+                  ),
+                if (scan != null)
+                  for (final item in scan.cardStatuses.entries)
+                    Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: Text('${item.key}: ${_status(item.value)}'),
+                    ),
+              ],
+            ),
+          ),
         ],
       ),
-    ),
+    );
+  }
+
+  List<Widget> _recordSummary(AppLocalizations l, Uint8List bytes) {
+    final inspected = inspectCpuDirectoryRecord(bytes);
+    return [
+      for (final field in inspected.fields)
+        CpuInfoRow(
+          label: switch (field.tag) {
+            0x4F => 'AID (4F)',
+            0x50 => l.cpu_tree_app_label,
+            _ => 'DDF (9D)',
+          },
+          value: field.tag == 0x50
+              ? cpuDirectoryLabel(field.value)
+              : cpuAidHex(field.value),
+        ),
+      for (final issue in inspected.issues)
+        Text(switch (issue.kind) {
+          CpuDirectoryIssueKind.structure => l.cpu_tree_record_structure,
+          CpuDirectoryIssueKind.lengthBytes => l.cpu_tree_record_length_error(
+            _hex(issue.tag!, 2),
+            issue.offset,
+            issue.expected,
+            issue.available,
+          ),
+          CpuDirectoryIssueKind.value => l.cpu_tree_record_value_error(
+            _hex(issue.tag!, 2),
+            issue.offset,
+            issue.expected,
+            issue.available,
+          ),
+          _ => l.cpu_tree_record_tlv_error(issue.offset),
+        }, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+    ];
+  }
+
+  Widget _dataPane(AppLocalizations l, double actionHeight) {
+    final file = _file, address = _address, read = _lastRead;
+    final actions = file == null ? <_FileAction>[] : _actionsFor(file);
+    final isRecord = file?.kind == CpuLiveFileKind.record;
+    final maxRecord = math.min(file?.recordCount ?? 254, _lastRecordInFile);
+    return Card(
+      margin: EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsetsDirectional.fromSTEB(14, 10, 10, 6),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    isRecord
+                        ? l.cpu_tree_record_title(_recordNumber)
+                        : l.cpu_tree_preview,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                if (isRecord) ...[
+                  IconButton(
+                    icon: const Icon(Icons.chevron_left),
+                    tooltip: l.cpu_tree_previous_record,
+                    onPressed: _busy || _recordNumber <= 1
+                        ? null
+                        : () => _run(
+                            () => _loadPreview(record: _recordNumber - 1),
+                          ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.chevron_right),
+                    tooltip: l.cpu_tree_next_record,
+                    onPressed: _busy || _recordNumber >= maxRecord
+                        ? null
+                        : () => _run(
+                            () => _loadPreview(record: _recordNumber + 1),
+                          ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: ListView(
+              key: ValueKey('cpu-detail:${address?.display}'),
+              primary: false,
+              padding: const EdgeInsets.all(14),
+              children: [
+                if (file == null)
+                  Text(l.cpu_tree_pick_entry)
+                else ...[
+                  if (_previewError != null)
+                    Text(
+                      _previewError!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  if (read != null) ...[
+                    if (address?.sfi != null) ..._recordSummary(l, read.data),
+                    const SizedBox(height: 6),
+                    SelectableText(
+                      bytesToHexSpace(read.data),
+                      style: const TextStyle(fontFamily: 'monospace'),
+                    ),
+                    Wrap(
+                      spacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(l.cpu_manage_bytes(read.data.length)),
+                        if (read.data.isNotEmpty)
+                          TextButton.icon(
+                            icon: const Icon(Icons.copy, size: 16),
+                            label: Text(l.copy),
+                            onPressed: () => Clipboard.setData(
+                              ClipboardData(text: bytesToHexSpace(read.data)),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const Divider(),
+                  ],
+                  CpuInfoRow(
+                    label: l.cpu_manage_selected_file,
+                    value: _selectionLabel(file),
+                  ),
+                  CpuInfoRow(label: l.cpu_files_type, value: _kind(file.kind)),
+                  if (file.directorySfi != null || address?.sfi != null)
+                    CpuInfoRow(
+                      label: l.cpu_tree_directory_sfi,
+                      value: '${address?.sfi ?? file.directorySfi}',
+                    ),
+                  if (file.size != null) Text(l.cpu_manage_bytes(file.size!)),
+                  if (file.recordLength != null)
+                    CpuInfoRow(
+                      label: l.cpu_files_record_length,
+                      value: '${file.recordLength}',
+                    ),
+                  if (file.recordCount != null)
+                    CpuInfoRow(
+                      label: l.cpu_manage_records,
+                      value: '${file.recordCount}',
+                    ),
+                  if (file.control.isNotEmpty)
+                    ExpansionTile(
+                      title: const Text('FCI / FCP'),
+                      tilePadding: EdgeInsets.zero,
+                      children: [SelectableText(bytesToHexSpace(file.control))],
+                    ),
+                ],
+              ],
+            ),
+          ),
+          if (actions.isNotEmpty) ...[
+            const Divider(height: 1),
+            ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: actionHeight),
+              child: SingleChildScrollView(
+                primary: false,
+                padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 2,
+                  children: [
+                    for (final action in actions)
+                      _button(
+                        action.icon,
+                        action.label,
+                        () => _run(action.run),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _workspace(AppLocalizations l) => LayoutBuilder(
+    builder: (context, constraints) {
+      final wide = constraints.maxWidth >= 740;
+      final detail = _dataPane(
+        l,
+        math.min(wide ? 150.0 : 112.0, constraints.maxHeight * 0.30),
+      );
+      if (wide) {
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(
+              width: (constraints.maxWidth * 0.33).clamp(282.0, 410.0),
+              child: _treePane(l),
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: detail),
+          ],
+        );
+      }
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(flex: 2, child: _treePane(l)),
+          const SizedBox(height: 8),
+          Expanded(flex: 3, child: detail),
+        ],
+      );
+    },
   );
 
   @override
   Widget build(BuildContext context) {
     context.watch<ChameleonGUIState>();
     final l = _l;
-    final active = _active;
-    final file = active ? _file : null;
-    final scan = _directoryScan;
-    final read = active ? _lastRead : null;
-    final online = _online;
     return PopScope(
       canPop: !_busy,
       child: Scaffold(
-        appBar: AppBar(title: Text(l.cpu_manage_title)),
-        body: Align(
-          alignment: Alignment.topCenter,
+        appBar: AppBar(
+          title: Text(l.cpu_manage_title),
+          actions: [
+            PopupMenuButton<_ManagerTool>(
+              tooltip: l.cpu_manage_profiles,
+              enabled: !_busy,
+              onSelected: _chooseTool,
+              itemBuilder: (_) => [
+                PopupMenuItem(
+                  value: _ManagerTool.profiles,
+                  child: Text(l.cpu_manage_profile_library),
+                ),
+                PopupMenuItem(
+                  value: _ManagerTool.slots,
+                  enabled: _app.connector?.connected == true,
+                  child: Text(l.slot_manager),
+                ),
+                PopupMenuItem(
+                  value: _ManagerTool.apdu,
+                  enabled: _online,
+                  child: Text(l.cpu_apdu_tools),
+                ),
+                PopupMenuItem(
+                  value: _ManagerTool.radio,
+                  enabled: _identity != null,
+                  child: Text(l.cpu_radio_details),
+                ),
+              ],
+            ),
+          ],
+        ),
+        body: Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 840),
-            child: ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                _section(l.cpu_manage_live, [
-                  CpuIdentityPanel(identity: _identity),
-                  Text(
-                    active
-                        ? l.cpu_manage_session_active
-                        : online
-                        ? l.cpu_manage_session_idle
-                        : l.raw_ultra_required,
+            constraints: const BoxConstraints(maxWidth: 1540),
+            child: Padding(
+              padding: const EdgeInsets.all(10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _connectionBar(l),
+                  SizedBox(
+                    height: 3,
+                    child: _busy ? const LinearProgressIndicator() : null,
                   ),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 6,
-                    children: [
-                      FilledButton.icon(
-                        icon: Icon(active ? Icons.refresh : Icons.contactless),
-                        label: Text(
-                          active ? l.cpu_manage_reselect : l.cpu_manage_connect,
-                        ),
-                        onPressed: online && !_busy
-                            ? () => _run(() async {
-                                if (active) await _disconnect();
-                                if (mounted) await _connect();
-                              })
-                            : null,
-                      ),
-                      _button(
-                        Icons.power_settings_new,
-                        l.cpu_disconnect,
-                        active ? () => _run(_disconnect) : null,
-                      ),
-                      _button(
-                        Icons.save_outlined,
-                        l.save_only_uid,
-                        _identity == null ? null : () => _run(_saveIdentity),
-                      ),
-                    ],
-                  ),
-                ]),
-                if (_busy) const LinearProgressIndicator(),
-                if (_notice != null)
-                  Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: SelectableText(
-                      _notice!,
-                      style: TextStyle(
-                        color: _problem
-                            ? Theme.of(context).colorScheme.error
-                            : null,
-                      ),
-                    ),
-                  ),
-                if (active)
-                  _section(l.cpu_manage_files, [
-                    Text(l.cpu_manage_directory_help),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 6,
-                      children: [
-                        _button(
-                          Icons.refresh,
-                          l.cpu_tree_refresh,
-                          () => _run(_discoverDirectory),
-                        ),
-                        _button(
-                          Icons.home_outlined,
-                          'MF 3F00',
-                          () => _run(_openMaster),
-                        ),
-                        _button(
-                          Icons.apps,
-                          l.cpu_manage_select_aid,
-                          () => _run(_chooseAid),
-                        ),
-                        _button(
-                          Icons.folder_open,
-                          l.cpu_manage_open_df,
-                          () => _run(() => _chooseFile(true)),
-                        ),
-                        _button(
-                          Icons.insert_drive_file_outlined,
-                          l.cpu_manage_open_ef,
-                          () => _run(() => _chooseFile(false)),
-                        ),
-                        _button(
-                          Icons.arrow_upward,
-                          l.cpu_manage_parent,
-                          file?.isDirectory == true &&
-                                  file?.fid != 0x3F00 &&
-                                  _address?.metadataOnly != true
-                              ? () => _run(
-                                  () => _select(
-                                    (card) => card.selectParent(),
-                                    address: _directoryAddress?.parent,
-                                  ),
-                                )
+                  if (_notice case final notice?)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+                      child: Text(
+                        notice,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: _problem
+                              ? Theme.of(context).colorScheme.error
                               : null,
                         ),
-                      ],
+                      ),
                     ),
-                    if (!_tree.isEmpty)
-                      CpuDirectoryView(
-                        tree: _tree,
-                        selected: _address,
-                        onOpen: _busy
-                            ? null
-                            : (entry) => _run(() => _openEntry(entry)),
-                        onContextMenu: _busy ? null : _entryMenu,
-                      ),
-                    if (scan != null) ...[
-                      if (_tree.isEmpty ||
-                          (_tree.childrenOf(null).length == 1 &&
-                              _tree.childrenOf(null).single.isMaster &&
-                              _tree
-                                  .childrenOf(const CpuFileAddress.master())
-                                  .isEmpty))
-                        Text(l.cpu_tree_no_entries),
-                      if (scan.incomplete) Text(l.cpu_tree_incomplete),
-                      for (final item in scan.cardStatuses.entries)
-                        Text('${item.key}: ${_status(item.value)}'),
-                    ],
-                    if (file != null) ...[
-                      const Divider(),
-                      CpuInfoRow(
-                        label: l.cpu_manage_selected_file,
-                        value: _selectionLabel(file),
-                      ),
-                      CpuInfoRow(
-                        label: l.cpu_files_type,
-                        value: _kind(file.kind),
-                      ),
-                      if (file.directorySfi != null || _address?.sfi != null)
-                        CpuInfoRow(
-                          label: l.cpu_tree_directory_sfi,
-                          value: '${_address?.sfi ?? file.directorySfi}',
-                        ),
-                      if (file.size != null)
-                        Text(l.cpu_manage_bytes(file.size!)),
-                      if (file.recordLength != null)
-                        CpuInfoRow(
-                          label: l.cpu_files_record_length,
-                          value: '${file.recordLength}',
-                        ),
-                      if (file.recordCount != null)
-                        CpuInfoRow(
-                          label: l.cpu_manage_records,
-                          value: '${file.recordCount}',
-                        ),
-                      if (file.control.isNotEmpty)
-                        ExpansionTile(
-                          title: const Text('FCI / FCP'),
-                          tilePadding: EdgeInsets.zero,
-                          children: [
-                            SelectableText(bytesToHexSpace(file.control)),
-                          ],
-                        ),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 6,
-                        children: [
-                          for (final action in _actionsFor(file))
-                            _button(
-                              action.icon,
-                              action.label,
-                              () => _run(action.run),
-                            ),
-                        ],
-                      ),
-                    ],
-                    if (read != null) ...[
-                      const Divider(),
-                      Text(l.cpu_manage_bytes(read.data.length)),
-                      SelectableText(
-                        bytesToHexSpace(read.data),
-                        style: const TextStyle(fontFamily: 'monospace'),
-                      ),
-                      if (read.data.isNotEmpty)
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: _button(
-                            Icons.copy,
-                            l.copy,
-                            () => Clipboard.setData(
-                              ClipboardData(text: bytesToHexSpace(read.data)),
+                  const SizedBox(height: 7),
+                  Expanded(
+                    child: _active
+                        ? _workspace(l)
+                        : Center(
+                            child: Padding(
+                              padding: const EdgeInsets.all(14),
+                              child: Text(
+                                _online
+                                    ? l.cpu_place_help
+                                    : l.raw_ultra_required,
+                              ),
                             ),
                           ),
-                        ),
-                    ],
-                  ]),
-                _section(l.cpu_manage_profiles, [
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 6,
-                    children: [
-                      _button(
-                        Icons.credit_card,
-                        l.cpu_manage_profile_library,
-                        () => _run(() => _openTool(const CpuProfilesPage())),
-                      ),
-                      _button(
-                        Icons.storage,
-                        l.slot_manager,
-                        _app.connector?.connected == true
-                            ? () =>
-                                  _run(() => _openTool(const SlotManagerPage()))
-                            : null,
-                      ),
-                      _button(
-                        Icons.terminal,
-                        l.cpu_apdu_tools,
-                        online
-                            ? () => _run(
-                                () => _openTool(
-                                  const CpuCardMenu(),
-                                  dialog: true,
-                                ),
-                              )
-                            : null,
-                      ),
-                    ],
                   ),
-                ]),
-              ],
+                ],
+              ),
             ),
           ),
         ),

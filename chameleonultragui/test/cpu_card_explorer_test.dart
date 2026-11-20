@@ -1,0 +1,167 @@
+import 'dart:typed_data';
+
+import 'package:chameleonultragui/bridge/chameleon.dart';
+import 'package:chameleonultragui/connector/serial_abstract.dart';
+import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
+import 'package:chameleonultragui/gui/menu/tools/cpu_card_manager.dart';
+import 'package:chameleonultragui/helpers/definitions.dart';
+import 'package:chameleonultragui/helpers/general.dart' show bytesToHexSpace;
+import 'package:chameleonultragui/helpers/iso14443_4.dart';
+import 'package:chameleonultragui/main.dart';
+import 'package:chameleonultragui/sharedprefsprovider.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:logger/logger.dart';
+import 'package:provider/provider.dart';
+
+class _Connection extends AbstractSerial {
+  _Connection() : super(log: Logger()) {
+    connected = true;
+    device = ChameleonDevice.ultra;
+  }
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+const _directoryFci = '6F15840E315041592E5359532E4444463031A5038801019000';
+const _directoryRecord = '701361114F09A00000000386980791509450BA4FBB';
+
+class _Card extends ChameleonCommunicator {
+  _Card() : super(Logger());
+
+  final script = <(String, String)>[
+    ('00A40000023F0000', _directoryFci),
+    ('00B2010C00', '${_directoryRecord}9000'),
+    ('00B2020C00', '6A83'),
+    ('00A404000E325041592E5359532E444446303100', '6A82'),
+    ('00A4040007D276000085010100', '6A82'),
+    ('00A40000023F0000', _directoryFci),
+    ('00B2010C00', '${_directoryRecord}9000'),
+    ('00A4040009A0000000038698079100', '6F0B8409A000000003869807919000'),
+  ];
+  int exchanges = 0;
+
+  @override
+  Future<List<int>> getDeviceCapabilities() async => [6011];
+
+  @override
+  Future<bool> isReaderDeviceMode() async => true;
+
+  @override
+  Future<(CardData, Uint8List)> hf14a4OpenManagedSession() async => (
+    CardData(
+      uid: cpuHex('01020304'),
+      atqa: cpuHex('0004'),
+      sak: 0x20,
+      ats: cpuHex('0208'),
+    ),
+    cpuHex('00000001'),
+  );
+
+  @override
+  Future<void> hf14a4CloseManagedSession(Uint8List id) async {}
+
+  @override
+  Future<Uint8List> hf14a4ManagedApdu(Uint8List id, Uint8List apdu) async {
+    expect(exchanges, lessThan(script.length), reason: 'Unexpected APDU');
+    final (command, reply) = script[exchanges++];
+    expect(apdu, cpuHex(command));
+    return cpuHex(reply);
+  }
+}
+
+void main() {
+  testWidgets(
+    'context gestures only open the menu; file selection previews its malformed record',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1180, 690));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final card = _Card();
+      final app = ChameleonGUIState(SharedPreferencesProvider())
+        ..communicator = card
+        ..connector = _Connection();
+      await tester.pumpWidget(
+        ChangeNotifierProvider.value(
+          value: app,
+          child: const MaterialApp(
+            locale: Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: CpuCardManager(),
+          ),
+        ),
+      );
+      final l = AppLocalizations.of(
+        tester.element(find.byType(CpuCardManager)),
+      )!;
+      await tester.tap(find.text(l.cpu_manage_connect));
+      await tester.pumpAndSettle();
+      expect(card.exchanges, 6);
+      final file = find.text(l.cpu_tree_record_file);
+      final menu = find.text(l.cpu_tree_open_entry);
+
+      await tester.tap(
+        file,
+        kind: PointerDeviceKind.mouse,
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      expect(menu, findsOneWidget);
+      expect(card.exchanges, 6);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(menu, findsNothing);
+
+      final press = await tester.startGesture(tester.getCenter(file));
+      await tester.pump(const Duration(milliseconds: 650));
+      expect(menu, findsNothing);
+      await press.up();
+      await tester.pumpAndSettle();
+      expect(menu, findsOneWidget);
+      expect(card.exchanges, 6);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+
+      await tester.tap(file);
+      await tester.pumpAndSettle();
+      expect(card.exchanges, 7);
+      expect(find.text(l.cpu_tree_record_title(1)), findsOneWidget);
+      expect(
+        find.text(l.cpu_tree_record_length_error('50', 15, 20, 4)),
+        findsOneWidget,
+      );
+      expect(
+        find.text(bytesToHexSpace(cpuHex(_directoryRecord))),
+        findsOneWidget,
+      );
+      final read = find.widgetWithText(
+        OutlinedButton,
+        l.cpu_manage_read_record,
+      );
+      expect(read, findsOneWidget);
+      expect(
+        tester.getTopLeft(read).dx,
+        greaterThan(tester.getTopLeft(file).dx),
+      );
+      expect(
+        tester.getTopLeft(read).dy,
+        greaterThan(
+          tester.getTopLeft(find.text(l.cpu_tree_record_title(1))).dy,
+        ),
+      );
+
+      await tester.tap(find.text('AID A00000000386980791'));
+      await tester.pumpAndSettle();
+      expect(card.exchanges, card.script.length);
+      expect(read, findsNothing);
+      expect(
+        find.widgetWithText(OutlinedButton, l.cpu_manage_open_ef),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+}
