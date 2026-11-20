@@ -1,4 +1,10 @@
 {
+  "cpu_manage_purse_balance": "电子钱包余额",
+  "cpu_manage_purse_amount": "{amount} 元",
+  "cpu_manage_purse_refresh": "刷新电子钱包余额",
+  "cpu_manage_purse_reading": "正在读取卡片…",
+  "cpu_manage_purse_unread": "尚未读取余额。",
+  "cpu_manage_purse_bad_response": "卡片没有返回可识别的 4 字节余额。",
   "cpu_tree_missing_aid": "本次未找到",
   "cpu_manage_missing_aid_help": "卡片未找到这个完整 AID。目录里有登记，不代表卡片支持按该名称选中。知道实际目录的 FID 或路径时，可以直接打开。",
   "cpu_manage_open_known_fid": "按已知 FID 或路径打开",

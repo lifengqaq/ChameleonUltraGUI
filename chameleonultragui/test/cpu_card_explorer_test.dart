@@ -107,6 +107,50 @@ Future<AppLocalizations> _openExplorer(WidgetTester tester, _Card card) async {
 
 void main() {
   testWidgets(
+    'selecting the City Union AID displays the balance read from the card, including zero',
+    (tester) async {
+      final card = _Card([
+        ..._Card._pseScan,
+        ('00A4040009A0000000038698070100', '6F0B8409A000000003869807019000'),
+        ('805C000204', '000000009000'),
+        ('805C000204', '000030399000'),
+        ('805C000204', '6A81'),
+        ('805C000204', '0000009000'),
+        ('00A4040009A0000000038698079100', '6F0B8409A000000003869807919000'),
+      ]);
+      final l = await _openExplorer(tester, card);
+      await tester.tap(find.byTooltip(l.cpu_tree_manual));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(l.cpu_manage_select_aid));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), 'A00000000386980701');
+      await tester.tap(find.widgetWithText(FilledButton, l.ok));
+      await tester.pumpAndSettle();
+      expect(find.text(l.cpu_manage_purse_amount('0.00')), findsOneWidget);
+
+      final refresh = find.byTooltip(l.cpu_manage_purse_refresh);
+      await tester.tap(refresh);
+      await tester.pumpAndSettle();
+      expect(find.text(l.cpu_manage_purse_amount('123.45')), findsOneWidget);
+
+      await tester.tap(refresh);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('SW 6A81'), findsOneWidget);
+      expect(find.text(l.cpu_manage_purse_amount('0.00')), findsNothing);
+      expect(find.text(l.cpu_manage_purse_amount('123.45')), findsNothing);
+
+      await tester.tap(refresh);
+      await tester.pumpAndSettle();
+      expect(find.text(l.cpu_manage_purse_bad_response), findsOneWidget);
+
+      await tester.tap(find.text('AID A00000000386980791'));
+      await tester.pumpAndSettle();
+      expect(find.text(l.cpu_manage_purse_balance), findsNothing);
+      expect(card.exchanges, card.script.length);
+    },
+  );
+
+  testWidgets(
     'context gestures only open the menu; file selection previews its malformed record',
     (tester) async {
       final card = _Card();

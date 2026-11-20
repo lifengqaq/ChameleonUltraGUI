@@ -15,6 +15,10 @@ bool _selectVariantRejected(int status) =>
 
 const cpuPseName = '1PAY.SYS.DDF01';
 const cpuPpseName = '2PAY.SYS.DDF01';
+const _cityUnionPurseAid = [0xA0, 0, 0, 0, 3, 0x86, 0x98, 7, 1];
+
+bool cpuIsCityUnionPurse(List<int>? aid) =>
+    aid != null && _cpuBytesEqual(aid, _cityUnionPurseAid);
 
 bool cpuIsPaymentDirectoryName(List<int>? name) =>
     name != null &&
@@ -458,6 +462,16 @@ class CpuCardAccess {
       typedSelection: false,
       fid: path.last,
     );
+  }
+
+  /// City Union electronic purse (EP). The matching DF must be selected.
+  /// Return the card's big-endian binary amount in minor units on 9000 only.
+  Future<int> readCityUnionPurseBalance() async {
+    final reply = await _send([0x80, 0x5C, 0x00, 0x02, 0x04]);
+    if (reply.data.length != 4 || (reply.data.first & 0x80) != 0) {
+      throw const FormatException('Unexpected electronic purse balance format');
+    }
+    return ByteData.sublistView(reply.data).getUint32(0, Endian.big);
   }
 
   Future<CpuFileReply> readBinary(int offset, int length) {

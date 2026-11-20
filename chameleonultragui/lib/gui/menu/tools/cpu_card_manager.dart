@@ -73,6 +73,8 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   CpuFileAddress? _missingSelection;
   final _missingAids = <String>{};
   CpuFileReply? _lastRead;
+  int? _purseBalance;
+  String? _purseError;
   String? _previewError;
   int _recordNumber = 1;
   int _lastRecordInFile = 254;
@@ -88,6 +90,9 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   bool _ownsDevice(ChameleonCommunicator device) =>
       _online && identical(_app.communicator, device);
   bool get _active => _link != null && _ownsDevice(_link!.device);
+  bool get _purseSelected =>
+      _file?.isDirectory == true &&
+      cpuIsCityUnionPurse(_file?.aid ?? _address?.aid);
 
   @override
   void dispose() {
@@ -110,6 +115,8 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     _missingSelection = null;
     _directoryAddress = null;
     _lastRead = null;
+    _purseBalance = null;
+    _purseError = null;
     _previewError = null;
     _recordNumber = 1;
     _lastRecordInFile = 254;
@@ -385,6 +392,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
               card.selectAidForAccess(aid, readOnly: address.metadataOnly),
           address: address,
         );
+        await _loadPreview();
       }
     }
   }
@@ -481,10 +489,14 @@ class _CpuCardManagerState extends State<CpuCardManager> {
 
   Future<void> _loadPreview({int record = 1}) async {
     final file = _file;
-    if (!mounted ||
-        !_active ||
-        file == null ||
-        ![CpuLiveFileKind.binary, CpuLiveFileKind.record].contains(file.kind))
+    if (!mounted || !_active || file == null) return;
+    if (_purseSelected) {
+      if (_purseBalance == null && _purseError == null)
+        await _readPurseBalance();
+      return;
+    }
+    if (file.kind != CpuLiveFileKind.binary &&
+        file.kind != CpuLiveFileKind.record)
       return;
     final isRecord = file.kind == CpuLiveFileKind.record;
     final length = ((isRecord ? file.recordLength : file.size) ?? 256).clamp(
@@ -517,6 +529,27 @@ class _CpuCardManagerState extends State<CpuCardManager> {
             ? _l.cpu_tree_preview_protected
             : _status(error.word);
       });
+    }
+  }
+
+  Future<void> _readPurseBalance() async {
+    final file = _file;
+    if (!mounted || !_active || !_purseSelected) return;
+    final card = _card;
+    setState(() {
+      _purseBalance = null;
+      _purseError = null;
+    });
+    try {
+      final balance = await card.readCityUnionPurseBalance();
+      if (mounted && identical(_file, file))
+        setState(() => _purseBalance = balance);
+    } on CpuFileStatus catch (error) {
+      if (mounted && identical(_file, file))
+        setState(() => _purseError = _status(error.word));
+    } on FormatException {
+      if (mounted && identical(_file, file))
+        setState(() => _purseError = _l.cpu_manage_purse_bad_response);
     }
   }
 
@@ -1666,6 +1699,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                   ] else
                     Text(l.cpu_tree_pick_entry),
                 ] else ...[
+                  if (_purseSelected) _pursePane(l),
                   if (_previewError != null)
                     Text(
                       _previewError!,
@@ -1751,6 +1785,59 @@ class _CpuCardManagerState extends State<CpuCardManager> {
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  Widget _pursePane(AppLocalizations l) {
+    final balance = _purseBalance, error = _purseError;
+    final display = balance == null
+        ? null
+        : '${balance ~/ 100}.${(balance % 100).toString().padLeft(2, '0')}';
+    return Card.outlined(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsetsDirectional.fromSTEB(14, 8, 8, 8),
+        child: Row(
+          children: [
+            const Icon(Icons.account_balance_wallet_outlined),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    l.cpu_manage_purse_balance,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  if (display != null)
+                    Text(
+                      l.cpu_manage_purse_amount(display),
+                      style: Theme.of(context).textTheme.titleLarge,
+                    )
+                  else if (error != null)
+                    Text(
+                      error,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    )
+                  else
+                    Text(
+                      _busy
+                          ? l.cpu_manage_purse_reading
+                          : l.cpu_manage_purse_unread,
+                    ),
+                ],
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: l.cpu_manage_purse_refresh,
+              onPressed: _busy ? null : () => _run(_readPurseBalance),
+            ),
+          ],
+        ),
       ),
     );
   }

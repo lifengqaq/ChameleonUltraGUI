@@ -1,4 +1,11 @@
 {
+  "cpu_manage_purse_balance": "Electronic purse balance",
+  "cpu_manage_purse_amount": "CNY {amount}",
+  "@cpu_manage_purse_amount": {"placeholders": {"amount": {"type": "String"}}},
+  "cpu_manage_purse_refresh": "Refresh purse balance",
+  "cpu_manage_purse_reading": "Reading the card…",
+  "cpu_manage_purse_unread": "Balance not yet read.",
+  "cpu_manage_purse_bad_response": "The card did not return a supported 4-byte purse amount.",
   "cpu_tree_missing_aid": "Not found in this session",
   "cpu_manage_missing_aid_help": "The card did not find this exact AID. An application can be listed in the directory even when it cannot be selected by name. If you know the actual directory FID or path, open it directly.",
   "cpu_manage_open_known_fid": "Open by known FID or path",
