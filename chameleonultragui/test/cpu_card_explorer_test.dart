@@ -29,18 +29,28 @@ const _directoryFci = '6F15840E315041592E5359532E4444463031A5038801019000';
 const _directoryRecord = '701361114F09A00000000386980791509450BA4FBB';
 
 class _Card extends ChameleonCommunicator {
-  _Card() : super(Logger());
+  _Card([List<(String, String)>? operations])
+    : script =
+          operations ??
+          [
+            ..._pseScan,
+            ('00B2010C00', '${_directoryRecord}9000'),
+            (
+              '00A4040009A0000000038698079100',
+              '6F0B8409A000000003869807919000',
+            ),
+          ],
+      super(Logger());
 
-  final script = <(String, String)>[
+  static const _pseScan = <(String, String)>[
     ('00A40000023F0000', _directoryFci),
     ('00B2010C00', '${_directoryRecord}9000'),
     ('00B2020C00', '6A83'),
     ('00A404000E325041592E5359532E444446303100', '6A82'),
     ('00A4040007D276000085010100', '6A82'),
     ('00A40000023F0000', _directoryFci),
-    ('00B2010C00', '${_directoryRecord}9000'),
-    ('00A4040009A0000000038698079100', '6F0B8409A000000003869807919000'),
   ];
+  final List<(String, String)> script;
   int exchanges = 0;
 
   @override
@@ -72,32 +82,35 @@ class _Card extends ChameleonCommunicator {
   }
 }
 
+Future<AppLocalizations> _openExplorer(WidgetTester tester, _Card card) async {
+  await tester.binding.setSurfaceSize(const Size(1180, 690));
+  addTearDown(() => tester.binding.setSurfaceSize(null));
+  final app = ChameleonGUIState(SharedPreferencesProvider())
+    ..communicator = card
+    ..connector = _Connection();
+  await tester.pumpWidget(
+    ChangeNotifierProvider.value(
+      value: app,
+      child: const MaterialApp(
+        locale: Locale('en'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: CpuCardManager(),
+      ),
+    ),
+  );
+  final l = AppLocalizations.of(tester.element(find.byType(CpuCardManager)))!;
+  await tester.tap(find.text(l.cpu_manage_connect));
+  await tester.pumpAndSettle();
+  return l;
+}
+
 void main() {
   testWidgets(
     'context gestures only open the menu; file selection previews its malformed record',
     (tester) async {
-      await tester.binding.setSurfaceSize(const Size(1180, 690));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
       final card = _Card();
-      final app = ChameleonGUIState(SharedPreferencesProvider())
-        ..communicator = card
-        ..connector = _Connection();
-      await tester.pumpWidget(
-        ChangeNotifierProvider.value(
-          value: app,
-          child: const MaterialApp(
-            locale: Locale('en'),
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: CpuCardManager(),
-          ),
-        ),
-      );
-      final l = AppLocalizations.of(
-        tester.element(find.byType(CpuCardManager)),
-      )!;
-      await tester.tap(find.text(l.cpu_manage_connect));
-      await tester.pumpAndSettle();
+      final l = await _openExplorer(tester, card);
       expect(card.exchanges, 6);
       final file = find.text(l.cpu_tree_record_file);
       final menu = find.text(l.cpu_tree_open_entry);
@@ -162,6 +175,66 @@ void main() {
         findsOneWidget,
       );
       expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'missing directory entry can be replaced by a known path for creating and writing',
+    (tester) async {
+      final card = _Card([
+        ..._Card._pseScan,
+        ('00A4040009A0000000038698079100', '6A82'),
+        ('00A4040009A00000000386980791', '6A82'),
+        ('00A4040409A0000000038698079100', '6A86'),
+        ('00A4040C09A00000000386980791', '6A82'),
+        ('00A4080402100100', '620882023821830210019000'),
+        ('00E000000A62088202382183021100', '9000'),
+        ('00A40804041001100200', '620C8202012183021002800200209000'),
+        ('00D6000002AA55', '9000'),
+      ]);
+      final l = await _openExplorer(tester, card);
+      final ok = find.widgetWithText(FilledButton, l.ok);
+      await tester.tap(find.text('AID A00000000386980791'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining(l.cpu_tree_missing_aid), findsOneWidget);
+      await tester.tap(find.text(l.cpu_manage_open_known_fid));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), '1001');
+      await tester.tap(ok);
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.widgetWithText(OutlinedButton, l.cpu_manage_new_directory),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(l.cpu_files_add_df), findsWidgets);
+      await tester.enterText(find.byType(TextFormField).first, '1100');
+      await tester.tap(ok);
+      await tester.pumpAndSettle();
+      expect(card.exchanges, 11, reason: 'No write before confirmation');
+      await tester.tap(ok);
+      await tester.pumpAndSettle();
+      expect(find.text('FID 1100'), findsOneWidget);
+
+      await tester.tap(
+        find.widgetWithText(OutlinedButton, l.cpu_manage_write_file),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), '3F00/1001/1002');
+      await tester.tap(ok);
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField).last, 'AA 55');
+      await tester.tap(ok);
+      await tester.pumpAndSettle();
+      expect(
+        card.exchanges,
+        13,
+        reason: 'Selecting and editing the data must not write it',
+      );
+      await tester.tap(ok);
+      await tester.pumpAndSettle();
+      expect(card.exchanges, card.script.length);
+      expect(find.textContaining('SW 9000'), findsOneWidget);
     },
   );
 }

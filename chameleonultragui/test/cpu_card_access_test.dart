@@ -25,6 +25,21 @@ class _CardScript {
 }
 
 void main() {
+  test('explicit AID selection can omit Le but never changes the name or bypasses a security status', () async {
+    final script = _CardScript([
+      ('00A4040009A0000000038698079100', '6A82'),
+      ('00A4040009A00000000386980791', '6F0B8409A000000003869807919000'),
+      ('00A4040009A0000000038698079100', '6982'),
+    ]);
+    final card = CpuCardAccess(script.transmit);
+    final aid = cpuHex('A00000000386980791');
+    expect((await card.selectAidForAccess(aid)).aid, aid);
+    await expectLater(
+      card.selectAidForAccess(aid),
+      throwsA(isA<CpuFileStatus>().having((e) => e.word, 'status', 0x6982)),
+    );
+    script.done();
+  });
   testWidgets('expanded directory opens the file at its exact path', (
     tester,
   ) async {

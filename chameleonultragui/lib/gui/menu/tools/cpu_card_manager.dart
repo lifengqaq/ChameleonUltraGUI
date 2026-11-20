@@ -37,6 +37,7 @@ enum _Command {
   readRecord,
   updateBinary,
   updateRecord,
+  writeUnknown,
   createDf,
   createBinary,
   createRecords,
@@ -69,12 +70,15 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   CpuFileAddress? _address, _directoryAddress;
   CpuDirectoryTree _tree = CpuDirectoryTree();
   CpuDirectoryScan? _directoryScan;
+  CpuFileAddress? _missingSelection;
+  final _missingAids = <String>{};
   CpuFileReply? _lastRead;
   String? _previewError;
   int _recordNumber = 1;
   int _lastRecordInFile = 254;
   String? _notice;
   bool _busy = false, _problem = false, _menuOpen = false;
+  int _pendingIo = 0;
 
   AppLocalizations get _l => AppLocalizations.of(context)!;
   bool get _online =>
@@ -103,6 +107,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     _file = null;
     _directory = null;
     _address = null;
+    _missingSelection = null;
     _directoryAddress = null;
     _lastRead = null;
     _previewError = null;
@@ -113,6 +118,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   void _forgetSession() {
     _link = null;
     _tree = CpuDirectoryTree();
+    _missingAids.clear();
     _directoryScan = null;
     _forgetSelection();
   }
@@ -122,7 +128,9 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     setState(_forgetSession);
     if (link == null || !_ownsDevice(link.device)) return;
     try {
-      await link.device.hf14a4CloseManagedSession(link.id);
+      await _deviceRequest(
+        () => link.device.hf14a4CloseManagedSession(link.id),
+      );
     } on CpuCommandError catch (error) {
       if (error.status != 0x76 && error.status != 0x66) rethrow;
     }
@@ -136,15 +144,18 @@ class _CpuCardManagerState extends State<CpuCardManager> {
       _forgetSession();
       _identity = null;
     });
-    final commands = await device.getDeviceCapabilities();
-    if (!commands.contains(ChameleonCommand.hf14a4ManagedSession.value)) {
-      throw StateError(l.cpu_error_firmware);
-    }
-    if (!_ownsDevice(device)) throw StateError(l.cpu_manage_session_lost);
-    if (!await device.isReaderDeviceMode())
-      await device.setReaderDeviceMode(true);
-    if (!_ownsDevice(device)) throw StateError(l.cpu_manage_session_lost);
-    final (identity, id) = await device.hf14a4OpenManagedSession();
+    final (identity, id) = await _deviceRequest(() async {
+      final commands = await device.getDeviceCapabilities();
+      if (!commands.contains(ChameleonCommand.hf14a4ManagedSession.value)) {
+        throw StateError(l.cpu_error_firmware);
+      }
+      if (!_ownsDevice(device)) throw StateError(l.cpu_manage_session_lost);
+      if (!await device.isReaderDeviceMode()) {
+        await device.setReaderDeviceMode(true);
+      }
+      if (!_ownsDevice(device)) throw StateError(l.cpu_manage_session_lost);
+      return device.hf14a4OpenManagedSession();
+    });
     final link = (device: device, id: id);
     if (!mounted || !_ownsDevice(device)) {
       await _releaseQuietly(link);
@@ -157,12 +168,23 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     await _discoverDirectory();
   }
 
+  Future<T> _deviceRequest<T>(Future<T> Function() send) async {
+    if (mounted) setState(() => _pendingIo++);
+    try {
+      return await send();
+    } finally {
+      if (mounted) setState(() => _pendingIo--);
+    }
+  }
+
   Future<Uint8List> _transmit(_Link link, Uint8List apdu) async {
     try {
       if (_link != link || !_ownsDevice(link.device)) {
         throw StateError(_l.cpu_manage_session_lost);
       }
-      final result = await link.device.hf14a4ManagedApdu(link.id, apdu);
+      final result = await _deviceRequest(
+        () => link.device.hf14a4ManagedApdu(link.id, apdu),
+      );
       if (!mounted || !_ownsDevice(link.device) || _link != link) {
         throw const CpuSessionEnded();
       }
@@ -265,7 +287,11 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   }
 
   Future<void> _openMaster() => _select(
-    (card) => const CpuFileAddress.master().open(card, directory: true),
+    (card) => const CpuFileAddress.master().open(
+      card,
+      directory: true,
+      preferFcp: true,
+    ),
   );
 
   Future<void> _select(
@@ -278,7 +304,21 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     final previousAddress = relative ? _directoryAddress : null;
     final card = _card;
     setState(_forgetSelection);
-    final file = await select(card);
+    final CpuLiveFile file;
+    try {
+      file = await select(card);
+    } on CpuFileStatus catch (error) {
+      if (mounted &&
+          error.word == 0x6A82 &&
+          address != null &&
+          (expectedAid ?? address.aid) != null) {
+        setState(() {
+          _missingSelection = address;
+          _missingAids.add(address.display);
+        });
+      }
+      rethrow;
+    }
     if (!mounted) return;
     final explicitFid = address?.fid;
     if (explicitFid != null && file.fid != null && file.fid != explicitFid) {
@@ -306,6 +346,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
           ? location
           : location?.parent ?? previousAddress;
       if (location != null) {
+        _missingAids.remove(location.display);
         _tree.add(
           CpuDirectoryEntry(
             location,
@@ -335,17 +376,32 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     if (aid != null && mounted) {
       final address =
           _tree.applicationAddress(aid) ?? CpuFileAddress([], aid: aid);
-      await _select(
-        (card) => card.selectAid(aid, readOnly: address.metadataOnly),
-        address: address,
-      );
+      final entry = _tree.at(address);
+      if (entry != null) {
+        await _openEntry(entry);
+      } else {
+        await _select(
+          (card) =>
+              card.selectAidForAccess(aid, readOnly: address.metadataOnly),
+          address: address,
+        );
+      }
     }
   }
 
   Future<void> _chooseFile(bool directory) async {
+    await _locateFile(directory: directory);
+  }
+
+  Future<bool> _locateFile({
+    required bool directory,
+    String? title,
+    String? help,
+    bool preview = true,
+  }) async {
     final l = _l;
     final path = await _prompt(
-      directory ? l.cpu_manage_open_df : l.cpu_manage_open_ef,
+      title ?? (directory ? l.cpu_manage_open_df : l.cpu_manage_open_ef),
       [_Field(l.cpu_manage_path)],
       (values) {
         final parts = values.single.split('/').map(_readFid).toList();
@@ -355,27 +411,37 @@ class _CpuCardManagerState extends State<CpuCardManager> {
           throw const FormatException();
         return parts;
       },
-      help: l.cpu_manage_path_help,
+      help: [if (help != null) help, l.cpu_manage_path_help].join('\n\n'),
     );
-    if (path == null || !mounted) return;
+    if (path == null || !mounted) return false;
     if (path.length == 1 && path.first == 0x3F00) {
       await _openMaster();
-    } else if (path.length == 1) {
+    } else if (path.length == 1 &&
+        _directoryAddress != null &&
+        _directoryAddress?.metadataOnly != true) {
       await _select(
-        (card) => card.selectFile(path.first, directory: directory),
+        (card) =>
+            card.selectFile(path.first, directory: directory, preferFcp: true),
         relative: true,
       );
     } else {
+      final address = CpuFileAddress(
+        path.first == 0x3F00 ? path.sublist(1) : path,
+      );
       await _select(
-        (card) => card.selectPath(path.sublist(1), directory: directory),
-        address: CpuFileAddress(path.sublist(1)),
+        (card) => address.open(card, directory: directory, preferFcp: true),
+        address: address,
       );
     }
-    if (!directory) await _loadPreview();
+    if (!directory && preview) await _loadPreview();
+    return mounted && _active && _file != null;
   }
 
   Future<void> _discoverDirectory() async {
-    setState(_forgetSelection);
+    setState(() {
+      _forgetSelection();
+      _missingAids.clear();
+    });
     final scan = await discoverCpuDirectory(_card);
     if (!mounted) return;
     setState(() {
@@ -402,6 +468,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         card,
         directory: entry.isDirectory,
         type4: entry.type4,
+        preferFcp: !entry.isDirectory && !entry.address.metadataOnly,
         selectedDirectory: parent,
       ),
       address: entry.address,
@@ -603,6 +670,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         );
       },
       action: l.ok,
+      help: l.cpu_manage_write_file_help,
     );
     if (request == null || !mounted) return;
     final (index, data) = request;
@@ -614,6 +682,74 @@ class _CpuCardManagerState extends State<CpuCardManager> {
           ? _card.updateRecord(index, data)
           : _card.updateBinary(index, data),
     );
+  }
+
+  bool get _canWriteFile =>
+      _file != null &&
+      _file!.canChange &&
+      !_file!.isDirectory &&
+      _address?.metadataOnly != true;
+
+  bool get _canCreateHere =>
+      _file?.isDirectory == true &&
+      _file!.canChange &&
+      _address?.metadataOnly != true &&
+      (_file!.fid != null || _file!.aid != null);
+
+  Future<void> _writeFile() async {
+    final l = _l;
+    if (!_canWriteFile) {
+      if (!await _locateFile(
+        directory: false,
+        title: l.cpu_manage_choose_write_file,
+        help: l.cpu_manage_write_target_help,
+        preview: false,
+      ))
+        return;
+      if (!_canWriteFile) throw StateError(l.cpu_manage_no_write_target);
+    }
+    final kind = _file!.kind;
+    if (kind == CpuLiveFileKind.unknown) {
+      if (!mounted) return;
+      final record = await showDialog<bool>(
+        context: context,
+        builder: (dialog) => AlertDialog(
+          title: Text(l.cpu_manage_write_file),
+          content: Text(l.cpu_manage_choose_write_kind),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialog),
+              child: Text(l.cancel),
+            ),
+            OutlinedButton(
+              onPressed: () => Navigator.pop(dialog, false),
+              child: Text(l.cpu_manage_write_binary),
+            ),
+            OutlinedButton(
+              onPressed: () => Navigator.pop(dialog, true),
+              child: Text(l.cpu_manage_write_record),
+            ),
+          ],
+        ),
+      );
+      if (mounted && record != null) await _write(record: record);
+    } else {
+      await _write(record: kind == CpuLiveFileKind.record);
+    }
+  }
+
+  Future<void> _newDirectory() async {
+    final l = _l;
+    if (!_canCreateHere) {
+      if (!await _locateFile(
+        directory: true,
+        title: l.cpu_manage_choose_parent,
+        help: l.cpu_manage_new_directory_target_help,
+      ))
+        return;
+      if (!_canCreateHere) throw StateError(l.cpu_manage_no_create_target);
+    }
+    await _create(CpuLiveFileKind.directory);
   }
 
   Future<void> _create(CpuLiveFileKind kind) async {
@@ -1110,6 +1246,14 @@ class _CpuCardManagerState extends State<CpuCardManager> {
           () => _write(record: true),
         );
       }
+      if (canChange && kind == CpuLiveFileKind.unknown) {
+        add(
+          _Command.writeUnknown,
+          Icons.edit_outlined,
+          l.cpu_manage_write_file,
+          _writeFile,
+        );
+      }
     }
     if (canDelete) {
       add(
@@ -1286,6 +1430,16 @@ class _CpuCardManagerState extends State<CpuCardManager> {
               l.save_only_uid,
               identity == null ? null : () => _run(_saveIdentity),
             ),
+            _button(
+              Icons.edit_note,
+              l.cpu_manage_write_file,
+              active ? () => _run(_writeFile) : null,
+            ),
+            _button(
+              Icons.create_new_folder_outlined,
+              l.cpu_manage_new_directory,
+              active ? () => _run(_newDirectory) : null,
+            ),
             Text(
               identity == null
                   ? status
@@ -1364,7 +1518,8 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                 if (!_tree.isEmpty)
                   CpuDirectoryView(
                     tree: _tree,
-                    selected: _address,
+                    selected: _address ?? _missingSelection,
+                    missingAids: _missingAids,
                     onOpen: _busy
                         ? null
                         : (entry) => _run(() => _openEntry(entry)),
@@ -1487,9 +1642,30 @@ class _CpuCardManagerState extends State<CpuCardManager> {
               primary: false,
               padding: const EdgeInsets.all(14),
               children: [
-                if (file == null)
-                  Text(l.cpu_tree_pick_entry)
-                else ...[
+                if (file == null) ...[
+                  if (_missingSelection case final missing?) ...[
+                    Text(
+                      missing.display,
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(l.cpu_manage_missing_aid_help),
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: _button(
+                        Icons.folder_open,
+                        l.cpu_manage_open_known_fid,
+                        () => _run(() async {
+                          await _locateFile(
+                            directory: true,
+                            title: l.cpu_manage_open_known_fid,
+                          );
+                        }),
+                      ),
+                    ),
+                  ] else
+                    Text(l.cpu_tree_pick_entry),
+                ] else ...[
                   if (_previewError != null)
                     Text(
                       _previewError!,
@@ -1659,7 +1835,9 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                   _connectionBar(l),
                   SizedBox(
                     height: 3,
-                    child: _busy ? const LinearProgressIndicator() : null,
+                    child: _pendingIo > 0
+                        ? const LinearProgressIndicator()
+                        : null,
                   ),
                   if (_notice case final notice?)
                     Padding(

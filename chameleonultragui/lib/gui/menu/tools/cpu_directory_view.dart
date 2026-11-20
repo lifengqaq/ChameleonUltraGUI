@@ -8,12 +8,14 @@ import 'package:flutter/material.dart';
 class CpuDirectoryView extends StatefulWidget {
   final CpuDirectoryTree tree;
   final CpuFileAddress? selected;
+  final Set<String> missingAids;
   final ValueChanged<CpuDirectoryEntry>? onOpen;
   final void Function(CpuDirectoryEntry, Offset)? onContextMenu;
   const CpuDirectoryView({
     super.key,
     required this.tree,
     this.selected,
+    this.missingAids = const {},
     this.onOpen,
     this.onContextMenu,
   });
@@ -34,6 +36,7 @@ class _CpuDirectoryViewState extends State<CpuDirectoryView> {
     final address = entry.address;
     final id = address.display;
     final children = widget.tree.childrenOf(address);
+    final missing = widget.missingAids.contains(id);
     final expanded = _expanded[id] ?? depth < 2;
     final kind = entry.kind == CpuLiveFileKind.directory
         ? 'DF'
@@ -53,6 +56,7 @@ class _CpuDirectoryViewState extends State<CpuDirectoryView> {
       if (address.aid == null && entry.applicationAid != null)
         'AID ${cpuAidHex(entry.applicationAid!)}',
       if (size != null) l.cpu_tree_capacity(size),
+      if (missing) l.cpu_tree_missing_aid,
     ].join(' · ');
     return [
       GestureDetector(
@@ -75,6 +79,9 @@ class _CpuDirectoryViewState extends State<CpuDirectoryView> {
                 : Icons.insert_drive_file_outlined,
           ),
           title: Text(title, maxLines: 2, overflow: TextOverflow.ellipsis),
+          textColor: missing
+              ? Theme.of(context).colorScheme.onSurfaceVariant
+              : null,
           subtitle: Text(details, maxLines: 2, overflow: TextOverflow.ellipsis),
           selected: widget.selected?.display == id,
           onTap: widget.onOpen == null ? null : () => widget.onOpen!(entry),

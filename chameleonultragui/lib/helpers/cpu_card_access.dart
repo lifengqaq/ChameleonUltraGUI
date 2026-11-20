@@ -9,6 +9,10 @@ import 'package:chameleonultragui/helpers/iso14443_4.dart';
 
 enum CpuLiveFileKind { directory, binary, record, unknown }
 
+bool _selectVariantRejected(int status) =>
+    const [0x6700, 0x6A81, 0x6A82, 0x6A86, 0x6D00].contains(status) ||
+    status >> 8 == 0x6C;
+
 const cpuPseName = '1PAY.SYS.DDF01';
 const cpuPpseName = '2PAY.SYS.DDF01';
 
@@ -267,6 +271,8 @@ class CpuCardAccess {
     required bool directory,
     bool typedSelection = true,
     bool readOnly = false,
+    int response = 0,
+    bool? withLe,
     int? fid,
     Uint8List? aid,
   }) async {
@@ -274,18 +280,23 @@ class CpuCardAccess {
       0x00,
       0xA4,
       mode,
-      0x00,
+      response,
       if (name.isNotEmpty) ...[name.length, ...name],
     ];
-    CpuFileReply response;
+    CpuFileReply reply;
     try {
-      response = await _send([...command, 0]);
+      reply = await _send([...command, if (withLe != false) 0]);
     } on CpuFileStatus catch (error) {
-      if (error.word != 0x6700) rethrow;
-      response = await _send(command);
+      if (error.word >> 8 == 0x6C && withLe != false) {
+        reply = await _send([...command, error.word & 255]);
+      } else if (error.word == 0x6700 && withLe == null) {
+        reply = await _send(command);
+      } else {
+        rethrow;
+      }
     }
     return CpuLiveFile.fromSelect(
-      response.data,
+      reply.data,
       directory: directory,
       typedSelection: typedSelection,
       readOnly: readOnly,
@@ -296,11 +307,66 @@ class CpuCardAccess {
 
   Future<CpuLiveFile> selectMaster() =>
       _select(0x00, _fid(0x3F00), directory: true, fid: 0x3F00);
+
+  /// A card can alias the default selection to a named application. FCP
+  /// alone establishes a real MF only when it actually returns FID 3F00.
+  Future<CpuLiveFile?> selectVerifiedMaster() async {
+    for (final withLe in [true, false]) {
+      try {
+        final file = await _select(
+          0,
+          _fid(0x3F00),
+          directory: true,
+          response: 4,
+          withLe: withLe,
+        );
+        if (file.fid == 0x3F00 && !cpuIsPaymentDirectoryName(file.aid))
+          return file;
+        return null;
+      } on CpuFileStatus catch (error) {
+        if (!_selectVariantRejected(error.word)) rethrow;
+      }
+    }
+    return null;
+  }
+
   Future<CpuLiveFile> selectParent() =>
       _select(0x03, const [], directory: true);
   Future<CpuLiveFile> selectAid(Uint8List aid, {bool readOnly = false}) {
     RangeError.checkValueInInterval(aid.length, 5, 16, 'AID length');
     return _select(0x04, aid, directory: true, aid: aid, readOnly: readOnly);
+  }
+
+  /// Only for an explicit user selection. Try the same exact DF name with
+  /// different SELECT response formats; never guess a prefix or retry auth.
+  Future<CpuLiveFile> selectAidForAccess(
+    Uint8List aid, {
+    bool readOnly = false,
+  }) async {
+    RangeError.checkValueInInterval(aid.length, 5, 16, 'AID length');
+    CpuFileStatus? failure;
+    for (final (p2, withLe) in [
+      (0, true),
+      (0, false),
+      (4, true),
+      (0x0C, false),
+    ]) {
+      try {
+        return await _select(
+          4,
+          aid,
+          directory: true,
+          aid: aid,
+          readOnly: readOnly,
+          response: p2,
+          withLe: withLe,
+        );
+      } on CpuFileStatus catch (error) {
+        if (!_selectVariantRejected(error.word)) rethrow;
+        if (failure == null || error.word == 0x6A82) failure = error;
+      }
+    }
+    throw failure!;
   }
 
   /// Type 4 EF selection uses the NFC Forum short SELECT without FCI.
@@ -319,8 +385,25 @@ class CpuCardAccess {
     );
   }
 
-  Future<CpuLiveFile> selectFile(int fid, {required bool directory}) async {
+  Future<CpuLiveFile> selectFile(
+    int fid, {
+    required bool directory,
+    bool preferFcp = false,
+  }) async {
     final id = _fid(fid);
+    if (preferFcp) {
+      try {
+        return await _select(
+          directory ? 1 : 2,
+          id,
+          directory: directory,
+          fid: fid,
+          response: 4,
+        );
+      } on CpuFileStatus catch (error) {
+        if (!_selectVariantRejected(error.word)) rethrow;
+      }
+    }
     try {
       return await _select(
         directory ? 0x01 : 0x02,
@@ -329,7 +412,10 @@ class CpuCardAccess {
         fid: fid,
       );
     } on CpuFileStatus catch (error) {
-      if (error.word != 0x6A86 && error.word != 0x6A81) rethrow;
+      if (error.word != 0x6A86 &&
+          error.word != 0x6A81 &&
+          !(preferFcp && error.word == 0x6A82))
+        rethrow;
       // Some cards only support generic FID selection. Without a descriptor
       // it cannot establish the file type needed to enable changes.
       return _select(
@@ -346,11 +432,28 @@ class CpuCardAccess {
     List<int> path, {
     required bool directory,
     bool relative = false,
-  }) {
+    bool preferFcp = false,
+  }) async {
     RangeError.checkValueInInterval(path.length, 1, 16, 'Path length');
+    final mode = relative ? 9 : 8;
+    final name = [for (final id in path) ..._fid(id)];
+    if (preferFcp) {
+      try {
+        return await _select(
+          mode,
+          name,
+          directory: directory,
+          typedSelection: false,
+          response: 4,
+          fid: path.last,
+        );
+      } on CpuFileStatus catch (error) {
+        if (!_selectVariantRejected(error.word)) rethrow;
+      }
+    }
     return _select(
-      relative ? 0x09 : 0x08,
-      [for (final id in path) ..._fid(id)],
+      mode,
+      name,
       directory: directory,
       typedSelection: false,
       fid: path.last,

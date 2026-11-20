@@ -73,6 +73,7 @@ class CpuFileAddress {
     CpuCardAccess card, {
     required bool directory,
     bool type4 = false,
+    bool preferFcp = false,
     CpuFileAddress? selectedDirectory,
   }) async {
     if (sfi != null) {
@@ -84,7 +85,7 @@ class CpuFileAddress {
     if (path.isEmpty) {
       if (aid != null) {
         try {
-          return await card.selectAid(
+          return await card.selectAidForAccess(
             Uint8List.fromList(aid!),
             readOnly: metadataOnly,
           );
@@ -101,8 +102,22 @@ class CpuFileAddress {
           return fallback;
         }
       }
-      final file = await card.selectMaster();
+      final CpuLiveFile file;
+      try {
+        file = await card.selectMaster();
+      } on CpuFileStatus catch (error) {
+        if (!preferFcp ||
+            !const [0x6A82, 0x6A86, 0x6A81, 0x6700].contains(error.word))
+          rethrow;
+        final master = await card.selectVerifiedMaster();
+        if (master == null) rethrow;
+        return master;
+      }
       if (cpuIsPaymentDirectoryName(file.aid)) {
+        if (preferFcp) {
+          final master = await card.selectVerifiedMaster();
+          if (master != null) return master;
+        }
         throw const FormatException(
           'The card returned a payment directory in place of MF',
         );
@@ -112,31 +127,55 @@ class CpuFileAddress {
     if (parent!.display == selectedDirectory?.display) {
       return type4
           ? card.selectType4File(path.last)
-          : card.selectFile(path.last, directory: directory);
+          : card.selectFile(
+              path.last,
+              directory: directory,
+              preferFcp: preferFcp,
+            );
     }
-    if (aid == null && !type4 && path.length > 1) {
+    if (aid == null && !type4 && (path.length > 1 || preferFcp)) {
       try {
-        return await card.selectPath(path, directory: directory);
+        return await card.selectPath(
+          path,
+          directory: directory,
+          preferFcp: preferFcp,
+        );
       } on CpuFileStatus catch (error) {
-        if (error.word != 0x6A86 && error.word != 0x6A81) rethrow;
+        if (![0x6A81, 0x6A86, 0x6A82].contains(error.word)) rethrow;
         // Some cards only implement child selection. The directory already
         // provided each exact FID; no search across neighboring IDs.
       }
     }
     if (aid == null) {
-      await const CpuFileAddress.master().open(card, directory: true);
+      await const CpuFileAddress.master().open(
+        card,
+        directory: true,
+        preferFcp: preferFcp,
+      );
     } else {
-      await card.selectAid(Uint8List.fromList(aid!));
+      await card.selectAidForAccess(
+        Uint8List.fromList(aid!),
+        readOnly: metadataOnly,
+      );
       if (path.length > 1) {
-        return card.selectPath(path, directory: directory, relative: true);
+        return card.selectPath(
+          path,
+          directory: directory,
+          relative: true,
+          preferFcp: preferFcp,
+        );
       }
     }
     for (final fid in path.take(path.length - 1)) {
-      await card.selectFile(fid, directory: true);
+      await card.selectFile(fid, directory: true, preferFcp: preferFcp);
     }
     return type4
         ? card.selectType4File(path.last)
-        : card.selectFile(path.last, directory: directory);
+        : card.selectFile(
+            path.last,
+            directory: directory,
+            preferFcp: preferFcp,
+          );
   }
 }
 
