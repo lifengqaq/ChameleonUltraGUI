@@ -241,6 +241,79 @@ void main() {
     },
   );
 
+  testWidgets('creates a FMCOS EF with separate access, then reads via MF', (
+    tester,
+  ) async {
+    const selectMf = ('00A40000023F00', _directoryFci);
+    const selectDf = ('00A40000021100', '6F0984055445535431A5009000');
+    const selectEf = ('00A40000020005', '9000');
+    final card = _Card([
+      ..._Card._emptyPseScan,
+      ('00A40000023F0000', _directoryFci),
+      ('00A40004023F0000', '6A86'),
+      ('00A40004023F00', '6A86'),
+      ('00A4000000', _directoryFci),
+      selectMf,
+      ('80E011000D380200F0F195FFFF5445535431', '9000'),
+      selectMf,
+      selectDf,
+      ('80E000050728000401F1FFFF', '9000'),
+      selectMf,
+      selectDf,
+      selectEf,
+      ('00B0000004', '6982'),
+      selectMf,
+      ('0084000004', 'BB83BFF39000'),
+      ('008200010874B0047DD681D96C', '9000'),
+      selectDf,
+      selectEf,
+      ('00B0000004', '123456789000'),
+    ]);
+    final l = await _openExplorer(tester, card);
+    final ok = find.widgetWithText(FilledButton, l.ok);
+    Future<void> tap(Finder finder) async {
+      await tester.ensureVisible(finder);
+      await tester.tap(finder);
+      await tester.pumpAndSettle();
+    }
+
+    await tap(find.byTooltip(l.cpu_tree_root));
+    await tap(find.widgetWithText(OutlinedButton, l.cpu_manage_fmcos_open));
+    await tap(find.widgetWithText(OutlinedButton, l.cpu_manage_new_directory));
+    await tap(ok);
+    await tap(ok);
+    await tap(find.text('FID 1100'));
+    await tap(find.widgetWithText(OutlinedButton, l.cpu_files_add_binary));
+    final fields = find.byType(TextFormField);
+    await tester.enterText(fields.at(0), '0005');
+    await tester.enterText(fields.at(1), '4');
+    await tester.enterText(fields.at(2), '01');
+    await tester.enterText(fields.at(3), 'F1');
+    await tap(ok);
+    await tap(ok);
+    await tap(find.text('FID 0005'));
+    expect(find.text(l.cpu_tree_preview_protected), findsOneWidget);
+    expect(find.text(l.cpu_manage_fmcos_recorded_access), findsOneWidget);
+    expect(card.exchanges, card.script.length - 6);
+    await tap(
+      find.widgetWithText(OutlinedButton, l.cpu_tree_authenticate_read),
+    );
+    expect(card.exchanges, card.script.length - 6);
+    await tap(find.widgetWithText(FilledButton, l.cpu_manage_auth_master));
+    await tester.enterText(
+      find.byKey(const PageStorageKey('cpu-auth-reference')),
+      '01',
+    );
+    await tester.enterText(
+      find.byKey(const PageStorageKey('cpu-auth-credential')),
+      '0102030405060708',
+    );
+    await tap(find.byKey(const ValueKey('cpu-auth-submit')));
+    expect(find.text('12 34 56 78', findRichText: true), findsOneWidget);
+    expect(find.text(l.cpu_tree_preview_protected), findsNothing);
+    expect(card.exchanges, card.script.length);
+  });
+
   testWidgets(
     'queries City Union balance separately and displays a real zero',
     (tester) async {
@@ -251,6 +324,11 @@ void main() {
         ('805C000204', '000030399000'),
         ('805C000204', '6A81'),
         ('805C000204', '0000009000'),
+        ('00B0950000', '6982'),
+        ('00A40000023F00', _directoryFci),
+        ('0084000004', 'BB83BFF39000'),
+        ('008200010874B0047DD681D96C', '9000'),
+        ('00A4040009A00000000386980701', '6F0B8409A000000003869807019000'),
         (
           '00B0950000',
           '0000200000000000000100000000000000000000202411202034112000009000',
@@ -287,6 +365,20 @@ void main() {
       expect(find.text(l.cpu_manage_purse_bad_response), findsOneWidget);
 
       await tester.tap(find.text(l.cpu_transit_read_info));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.widgetWithText(OutlinedButton, l.cpu_manage_auth_master),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const PageStorageKey('cpu-auth-reference')),
+        '01',
+      );
+      await tester.enterText(
+        find.byKey(const PageStorageKey('cpu-auth-credential')),
+        '0102030405060708',
+      );
+      await tester.tap(find.byKey(const ValueKey('cpu-auth-submit')));
       await tester.pumpAndSettle();
       expect(find.text(l.cpu_transit_info), findsOneWidget);
       expect(find.text('2024-11-20'), findsOneWidget);

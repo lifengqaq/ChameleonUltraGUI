@@ -101,6 +101,57 @@ class CpuPartialWrite implements Exception {
   const CpuPartialWrite(this.confirmedBytes, this.cause);
 }
 
+/// FMCOS 2.0 §7.13 plain binary or fixed-record EF creation parameters.
+class CpuFmcosEf {
+  final int size, readAccess, writeAccess;
+  final int? recordLength, recordCount;
+
+  CpuFmcosEf.binary({
+    required int size,
+    required this.readAccess,
+    required this.writeAccess,
+  }) : size = RangeError.checkValueInInterval(size, 1, 0x8000),
+       recordLength = null,
+       recordCount = null {
+    _checkAccess();
+  }
+
+  CpuFmcosEf.fixedRecords({
+    required int recordLength,
+    required int recordCount,
+    required this.readAccess,
+    required this.writeAccess,
+  }) : recordLength = RangeError.checkValueInInterval(recordLength, 1, 255),
+       recordCount = RangeError.checkValueInInterval(recordCount, 2, 254),
+       size = recordLength * recordCount {
+    _checkAccess();
+  }
+
+  void _checkAccess() {
+    RangeError.checkValueInInterval(readAccess, 0, 255, 'Read access');
+    RangeError.checkValueInInterval(writeAccess, 0, 255, 'Write access');
+  }
+
+  CpuLiveFileKind get kind =>
+      recordCount == null ? CpuLiveFileKind.binary : CpuLiveFileKind.record;
+
+  List<int> get _parameters => [
+    if (recordCount case final count?) ...[
+      0x2A,
+      count,
+      recordLength!,
+    ] else ...[
+      0x28,
+      size >> 8,
+      size & 255,
+    ],
+    readAccess,
+    writeAccess,
+    0xFF,
+    0xFF,
+  ];
+}
+
 class CpuLiveFile {
   final int? fid, size, recordLength, recordCount;
   final Uint8List? aid;
@@ -110,6 +161,7 @@ class CpuLiveFile {
   final String label;
   final int? directorySfi;
   final bool isFmcosMaster;
+  final CpuFmcosEf? fmcosEf;
   bool get matchesFmcosMasterFci => _cpuBytesEqual(control, _fmcosMasterFci);
   int? get reportedFid {
     final value = controlFields[0x83];
@@ -120,7 +172,7 @@ class CpuLiveFile {
   int? get descriptor => controlFields[0x82]?.firstOrNull;
   bool get fixedRecordLength =>
       kind == CpuLiveFileKind.record &&
-      const {2, 3, 6, 7}.contains((descriptor ?? 0) & 7);
+      (fmcosEf != null || const {2, 3, 6, 7}.contains((descriptor ?? 0) & 7));
   bool get hasDataObjects => (descriptor ?? 0) & 0xBF == 0x39;
   bool get isInternalEf => (descriptor ?? 0) & 0xB8 == 0x08;
   late final Map<int, Uint8List> controlFields = _readControlFields();
@@ -149,6 +201,13 @@ class CpuLiveFile {
   }
 
   bool get isDirectory => kind == CpuLiveFileKind.directory;
+  // A generic FID SELECT without FCI does not establish that a DF was opened.
+  bool get isFmcosDirectory =>
+      isFmcosMaster ||
+      (isDirectory &&
+          !cpuIsPaymentDirectoryName(aid) &&
+          ((descriptor ?? 0) & 0xBF == 0x38 ||
+              (aid != null && controlFields[0x84] != null)));
   bool get supportsBinary =>
       kind == CpuLiveFileKind.binary || kind == CpuLiveFileKind.unknown;
   bool get supportsRecords =>
@@ -166,7 +225,30 @@ class CpuLiveFile {
     this.label, {
     this.directorySfi,
     this.isFmcosMaster = false,
+    this.fmcosEf,
   });
+
+  /// Use only for an exact FID selected after a successful CREATE in this session.
+  CpuLiveFile withCreatedFmcosEf(CpuFmcosEf ef) {
+    if (isDirectory ||
+        isInternalEf ||
+        hasDataObjects ||
+        (kind != CpuLiveFileKind.unknown && kind != ef.kind)) {
+      throw const FormatException('SELECT conflicts with created FMCOS EF');
+    }
+    return CpuLiveFile._(
+      control,
+      ef.kind,
+      fid,
+      aid,
+      size ?? ef.size,
+      recordLength ?? ef.recordLength,
+      recordCount ?? ef.recordCount,
+      true,
+      label,
+      fmcosEf: ef,
+    );
+  }
 
   factory CpuLiveFile.shortFile({bool binary = false}) => CpuLiveFile._(
     Uint8List(0),
@@ -490,8 +572,8 @@ class CpuCardAccess {
     RangeError.checkValueInInterval(aid.length, 5, 16, 'AID length');
     CpuFileStatus? failure;
     for (final (p2, withLe) in [
-      (0, true),
-      (0, false),
+      (0, !useFmcosMaster),
+      (0, useFmcosMaster),
       (4, true),
       (0x0C, false),
     ]) {
@@ -776,7 +858,7 @@ class CpuCardAccess {
     }
   }
 
-  /// FMCOS 2.0 §7.13.3: create one child DF under the opened master file.
+  /// FMCOS 2.0 §7.13.3: create one child DF under the selected directory.
   Future<CpuFileReply> createFmcosDirectory(
     int fid, {
     required CpuLiveFile parent,
@@ -786,7 +868,7 @@ class CpuCardAccess {
     required int applicationFileId,
     required Uint8List name,
   }) {
-    if (!useFmcosMaster || !parent.isFmcosMaster) {
+    if (!useFmcosMaster || !parent.isFmcosDirectory) {
       throw StateError('FMCOS parent must be selected');
     }
     if (const [0, 0x3F00, 0x3FFF, 0xFFFF].contains(fid)) {
@@ -810,6 +892,28 @@ class CpuCardAccess {
       0xFF,
       ...name,
     ];
+    return _send([
+      0x80,
+      0xE0,
+      ..._fid(fid),
+      data.length,
+      ...data,
+    ], mutation: true);
+  }
+
+  /// Create an ordinary EF using the verified FMCOS profile in the current DF.
+  Future<CpuFileReply> createFmcosEf(
+    int fid, {
+    required CpuLiveFile parent,
+    required CpuFmcosEf ef,
+  }) {
+    if (!useFmcosMaster || !parent.isFmcosDirectory) {
+      throw StateError('FMCOS parent must be selected');
+    }
+    if (const [0, 0x3F00, 0x3FFF, 0xFFFF].contains(fid)) {
+      throw ArgumentError.value(fid, 'FID');
+    }
+    final data = ef._parameters;
     return _send([
       0x80,
       0xE0,

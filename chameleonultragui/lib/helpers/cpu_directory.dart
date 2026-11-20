@@ -92,6 +92,36 @@ class CpuFileAddress {
       ? 'FID ${cpuFidHex(fid!)}'
       : 'AID ${cpuAidHex(aid!)}';
 
+  /// Restore an exact address after authenticating at the verified FMCOS MF.
+  /// Keep the RF session and its MF security state; do not do another MF SELECT.
+  Future<CpuLiveFile> restoreFromFmcosMaster(
+    CpuCardAccess card,
+    CpuLiveFile master, {
+    required bool directory,
+  }) async {
+    if (!card.useFmcosMaster || !master.isFmcosMaster) {
+      throw StateError('FMCOS master must be selected');
+    }
+    if (sfi != null) {
+      await parent!.restoreFromFmcosMaster(card, master, directory: true);
+      return CpuLiveFile.shortFile(binary: shortBinary);
+    }
+    var current = aid == null
+        ? master
+        : await card.selectAidForAccess(
+            Uint8List.fromList(aid!),
+            readOnly: metadataOnly,
+          );
+    for (var i = 0; i < path.length; i++) {
+      final selectDirectory = directory || i < path.length - 1;
+      current = await card.selectFile(path[i], directory: selectDirectory);
+      if (selectDirectory && !current.isFmcosDirectory) {
+        throw const FormatException('FMCOS path did not return a DF');
+      }
+    }
+    return current;
+  }
+
   Future<CpuLiveFile> open(
     CpuCardAccess card, {
     required bool directory,
@@ -136,7 +166,10 @@ class CpuFileAddress {
               preferFcp: preferFcp,
             );
     }
-    if (aid == null && !type4 && (path.length > 1 || preferFcp)) {
+    if (!card.useFmcosMaster &&
+        aid == null &&
+        !type4 &&
+        (path.length > 1 || preferFcp)) {
       try {
         return await card.selectPath(
           path,
@@ -160,7 +193,7 @@ class CpuFileAddress {
         Uint8List.fromList(aid!),
         readOnly: metadataOnly,
       );
-      if (path.length > 1) {
+      if (path.length > 1 && !card.useFmcosMaster) {
         return card.selectPath(
           path,
           directory: directory,

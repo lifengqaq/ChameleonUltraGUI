@@ -39,6 +39,12 @@ typedef _BalancePreview = ({
   String? error,
 });
 
+typedef _FileRead = ({
+  int index,
+  bool record,
+  Future<CpuFileReply> Function() send,
+});
+
 enum _Command {
   open,
   openDf,
@@ -88,12 +94,15 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   CpuDirectoryScan? _directoryScan;
   CpuMasterUnavailable? _masterIssue;
   bool _fmcosMode = false;
+  final _fmcosFiles = <String, CpuFmcosEf>{};
+  final _fmcosDirectories = <String, ({int create, int erase})>{};
   CpuFileAddress? _missingSelection;
   final _missingAids = <String>{};
   CpuFileReply? _lastRead;
   ({int index, bool record}) _readPosition = (index: 0, record: false);
   _BalancePreview? _balance;
   String? _previewError;
+  _FileRead? _blockedRead;
   int _recordNumber = 1;
   int _lastRecordInFile = 254;
   String? _notice;
@@ -150,6 +159,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     _lastRead = null;
     _balance = null;
     _previewError = null;
+    _blockedRead = null;
     _recordNumber = 1;
     _lastRecordInFile = 254;
   }
@@ -157,6 +167,8 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   void _forgetSession() {
     _link = null;
     _fmcosMode = false;
+    _fmcosFiles.clear();
+    _fmcosDirectories.clear();
     _forgetSelection();
   }
 
@@ -289,6 +301,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   String _status(int word) {
     final l = _l;
     final description = switch (word) {
+      0x6281 when _fmcosMode => l.cpu_manage_fmcos_unwritten,
       0x6282 => l.cpu_manage_end_of_file,
       0x6981 => l.cpu_manage_wrong_kind,
       0x6A81 || 0x6D00 || 0x6E00 => l.cpu_status_instruction,
@@ -299,12 +312,12 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     return 'SW ${_hex(word, 4)} · $description';
   }
 
-  CpuAuthHistory _scopeHistory() {
+  CpuAuthHistory _scopeHistory([CpuFileAddress? directory]) {
     final identity = _identity!;
     return cpuAuthHistoryForCard(
       identity.uid,
       identity.ats,
-    ).inDirectory(_directoryAddress?.display ?? '');
+    ).inDirectory((directory ?? _directoryAddress)?.display ?? '');
   }
 
   Future<T> _withAccess<T>(
@@ -312,37 +325,138 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     Future<T> Function() send, {
     CpuAuthSettings? initial,
     String? scopeLabel,
-  }) {
+    int? fmcosPermission,
+  }) => runCpuFileOperation(
+    send,
+    authorize: () => _authorizeAccess(
+      operation,
+      initial: initial,
+      scopeLabel: scopeLabel,
+      fmcosPermission: fmcosPermission,
+    ),
+  );
+
+  Future<bool> _authorizeAccess(
+    String operation, {
+    CpuAuthSettings? initial,
+    String? scopeLabel,
+    int? fmcosPermission,
+  }) async {
     final file = _file!;
-    final link = _link;
+    final address = _address, directory = _directoryAddress, link = _link;
     final card = _card;
     final scope = scopeLabel ?? _selectionLabel(file);
-    final history = _scopeHistory();
+    final l = _l;
+    const master = CpuFileAddress.master();
+    const fmcosSettings = CpuAuthSettings(
+      profile: CpuAuthProfile.fmcos20,
+      method: CpuAuthMethod.des,
+    );
     bool sameSelection() =>
         mounted && _active && _link == link && _file == file;
-    return runCpuFileOperation(
-      send,
-      authorize: () async {
-        if (!sameSelection()) throw const CpuSessionEnded();
-        final accepted = await showCpuAuthentication(
-          context,
-          exchange: card.exchange,
-          history: history,
-          initial:
-              initial ??
-              (_fmcosMode
-                  ? const CpuAuthSettings(
-                      profile: CpuAuthProfile.fmcos20,
-                      method: CpuAuthMethod.des,
-                    )
-                  : const CpuAuthSettings()),
-          prefillCredential: false,
-          operation: '$operation\n$scope\n${_status(0x6982)}',
-        );
-        if (!sameSelection()) throw const CpuSessionEnded();
-        return accepted;
-      },
+    if (!sameSelection()) throw const CpuSessionEnded();
+
+    Future<bool> auth({bool atMaster = false}) async {
+      if (!sameSelection()) throw const CpuSessionEnded();
+      final accepted = await showCpuAuthentication(
+        context,
+        exchange: card.exchange,
+        history: _scopeHistory(atMaster ? master : directory),
+        initial: atMaster
+            ? initial?.isFmcos == true
+                  ? initial!
+                  : fmcosSettings
+            : initial ?? (_fmcosMode ? fmcosSettings : const CpuAuthSettings()),
+        prefillCredential: false,
+        operation: [
+          operation,
+          scope,
+          if (atMaster || directory?.display == master.display)
+            l.cpu_manage_auth_master
+          else if (directory != null)
+            '${l.cpu_manage_auth_current}: ${directory.display}',
+          _status(0x6982),
+        ].join('\n'),
+      );
+      if (!sameSelection()) throw const CpuSessionEnded();
+      return accepted;
+    }
+
+    final canUseFmcos =
+        _fmcosMode || _directoryScan?.master?.matchesFmcosMasterFci == true;
+    if (!canUseFmcos ||
+        address == null ||
+        directory == null ||
+        directory.display == master.display ||
+        _knownType4(file, address)) {
+      return auth();
+    }
+    final preferMaster =
+        fmcosPermission != null && fmcosPermission > 0 && fmcosPermission < 16;
+    final atMaster = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: Text(l.cpu_manage_auth_scope),
+        content: Text('$operation\n$scope\n\n${l.cpu_manage_auth_scope_help}'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog),
+            child: Text(l.cancel),
+          ),
+          for (final useMaster in [false, true])
+            if (useMaster == preferMaster)
+              FilledButton(
+                onPressed: () => Navigator.pop(dialog, useMaster),
+                child: Text(
+                  useMaster
+                      ? l.cpu_manage_auth_master
+                      : l.cpu_manage_auth_current,
+                ),
+              )
+            else
+              OutlinedButton(
+                onPressed: () => Navigator.pop(dialog, useMaster),
+                child: Text(
+                  useMaster
+                      ? l.cpu_manage_auth_master
+                      : l.cpu_manage_auth_current,
+                ),
+              ),
+        ],
+      ),
     );
+    if (!sameSelection()) throw const CpuSessionEnded();
+    if (atMaster == null) return false;
+    if (!atMaster) return auth();
+
+    // The scope changes temporarily. Restore the exact target before any read
+    // or write retries; if that fails, the old selection is no longer valid.
+    var restored = false;
+    try {
+      final fmcosCard = card.useFmcosMaster
+          ? card
+          : CpuCardAccess(card.exchange, useFmcosMaster: true);
+      final selectedMaster = await fmcosCard.openFmcosMaster();
+      final accepted = await auth(atMaster: true);
+      final reopened = await address.restoreFromFmcosMaster(
+        fmcosCard,
+        selectedMaster,
+        directory: file.isDirectory,
+      );
+      if (!sameSelection()) throw const CpuSessionEnded();
+      if ((file.aid != null &&
+              cpuAidHex(reopened.aid ?? const []) != cpuAidHex(file.aid!)) ||
+          (file.fid != null && reopened.fid != file.fid) ||
+          (reopened.kind != CpuLiveFileKind.unknown &&
+              file.kind != CpuLiveFileKind.unknown &&
+              reopened.kind != file.kind)) {
+        throw const FormatException('FMCOS restore returned another file');
+      }
+      restored = true;
+      return accepted;
+    } finally {
+      if (!restored && sameSelection()) setState(_forgetSelection);
+    }
   }
 
   Future<void> _openMaster() => _select(
@@ -369,10 +483,15 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     final previousAddress = relative ? _directoryAddress : null;
     final card = _card;
     setState(_forgetSelection);
-    final CpuLiveFile file;
+    final CpuLiveFile selected;
     try {
-      file = await select(card);
+      selected = await select(card);
     } on CpuFileStatus catch (error) {
+      if (mounted && error.word == 0x6982) {
+        throw StateError(
+          '${_l.cpu_manage_select_protected} ${_status(error.word)}',
+        );
+      }
       if (mounted &&
           error.word == 0x6A82 &&
           address != null &&
@@ -386,23 +505,27 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     }
     if (!mounted) return;
     final explicitFid = address?.fid;
-    if (explicitFid != null && file.fid != null && file.fid != explicitFid) {
+    if (explicitFid != null &&
+        selected.fid != null &&
+        selected.fid != explicitFid) {
       throw const FormatException('File ID differs from the published path');
     }
     if (expectedAid != null &&
-        file.aid != null &&
-        cpuAidHex(file.aid!) != cpuAidHex(expectedAid)) {
+        selected.aid != null &&
+        cpuAidHex(selected.aid!) != cpuAidHex(expectedAid)) {
       throw const FormatException(
         'Application differs from the published directory',
       );
     }
     final location =
         address ??
-        (file.fid == 0x3F00
+        (selected.fid == 0x3F00
             ? const CpuFileAddress.master()
-            : previousAddress != null && file.fid != null
-            ? previousAddress.child(file.fid!)
+            : previousAddress != null && selected.fid != null
+            ? previousAddress.child(selected.fid!)
             : null);
+    final ef = _fmcosFiles[location?.display];
+    final file = ef == null ? selected : selected.withCreatedFmcosEf(ef);
     setState(() {
       _file = file;
       _directory = file.isDirectory ? file : previousDirectory;
@@ -531,7 +654,9 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     bool preview = true,
   }) async {
     if (_address?.display == entry.address.display && _file != null) {
-      if (preview && _lastRead == null) await _loadPreview();
+      if (preview && _lastRead == null && _blockedRead == null) {
+        await _loadPreview();
+      }
       return;
     }
     final parent = _directoryAddress;
@@ -561,7 +686,10 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     final isRecord = file.kind == CpuLiveFileKind.record;
     final entry = _selectedEntry;
     if (entry?.type4File?.readAccess case final access? when access != 0) {
-      setState(() => _previewError = _l.cpu_type4_read_access);
+      setState(() {
+        _blockedRead = null;
+        _previewError = _l.cpu_type4_read_access;
+      });
       return;
     }
     final size = isRecord ? file.recordLength : file.size ?? entry?.capacity;
@@ -571,35 +699,73 @@ class _CpuCardManagerState extends State<CpuCardManager> {
       math.min(256, entry?.type4Header?.maxRead ?? 256),
     );
     final card = _card;
+    final sfi = _address?.sfi ?? 0;
+    await _readSelected((
+      index: isRecord ? record : 0,
+      record: isRecord,
+      send: () => isRecord
+          ? card.readRecord(record, length, sfi: sfi)
+          : entry?.address.shortBinary == true
+          ? card.readBinarySfi(sfi, 0, length)
+          : entry?.type4 == true && entry!.address.fid == cpuType4CcFid
+          ? readCpuType4Capability(card)
+          : entry?.type4File?.lengthBytes != null
+          ? _readNdefPreview(card, entry!)
+          : card.readBinary(0, length),
+    ), preview: true);
+  }
+
+  Future<void> _readSelected(
+    _FileRead request, {
+    bool preview = false,
+    bool retry = false,
+  }) async {
+    final file = _file!, l = _l;
+    final operation = request.record
+        ? l.cpu_manage_read_record
+        : l.cpu_manage_read_binary;
+    final permission = file.fmcosEf?.readAccess;
+    if (retry &&
+        !await _authorizeAccess(operation, fmcosPermission: permission)) {
+      return;
+    }
+    if (!mounted || !_active || _file != file) throw const CpuSessionEnded();
     setState(() {
+      if (!preview) _lastRead = null;
       _previewError = null;
+      _blockedRead = null;
     });
     try {
-      final response = isRecord
-          ? await card.readRecord(record, length, sfi: _address?.sfi ?? 0)
-          : entry?.address.shortBinary == true
-          ? await card.readBinarySfi(entry!.address.sfi!, 0, length)
-          : entry?.type4 == true && entry!.address.fid == cpuType4CcFid
-          ? await readCpuType4Capability(card)
-          : entry?.type4File?.lengthBytes != null
-          ? await _readNdefPreview(card, entry!)
-          : await card.readBinary(0, length);
+      final response = preview || retry
+          ? await request.send()
+          : await _withAccess(
+              operation,
+              request.send,
+              fmcosPermission: permission,
+            );
       if (!mounted) return;
       setState(() {
-        _recordNumber = record;
-        _showRead(response, index: isRecord ? record : 0, record: isRecord);
+        if (request.record) _recordNumber = request.index;
+        _showRead(response, index: request.index, record: request.record);
       });
+      if (!preview) _message(_status(response.status));
     } on CpuFileStatus catch (error) {
       if (!mounted) return;
+      if (!_active || _file != file) rethrow;
       setState(() {
-        if (isRecord && error.word == 0x6A83 && record > _recordNumber) {
-          _lastRecordInFile = record - 1;
+        if (preview &&
+            request.record &&
+            error.word == 0x6A83 &&
+            request.index > _recordNumber) {
+          _lastRecordInFile = request.index - 1;
         } else {
-          _recordNumber = record;
+          if (request.record) _recordNumber = request.index;
           _lastRead = null;
         }
-        _previewError = error.word == 0x6982
-            ? _l.cpu_tree_preview_protected
+        final protected = error.word == 0x6982;
+        _blockedRead = protected ? request : null;
+        _previewError = protected
+            ? l.cpu_tree_preview_protected
             : _status(error.word);
       });
     }
@@ -635,6 +801,8 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     required int index,
     required bool record,
   }) {
+    _blockedRead = null;
+    _previewError = null;
     _lastRead = reply;
     _readPosition = (index: index, record: record);
     if (_address case final address?)
@@ -738,10 +906,11 @@ class _CpuCardManagerState extends State<CpuCardManager> {
       parent,
       CpuTransitInfoProfile.infoSfi,
     );
-    final reply = await _card.readBinarySfi(
-      CpuTransitInfoProfile.infoSfi,
-      0,
-      256,
+    final l = _l, card = _card;
+    final reply = await _withAccess(
+      l.cpu_transit_read_info,
+      () => card.readBinarySfi(CpuTransitInfoProfile.infoSfi, 0, 256),
+      scopeLabel: address.display,
     );
     if (!mounted) return;
     setState(() {
@@ -860,16 +1029,13 @@ class _CpuCardManagerState extends State<CpuCardManager> {
       action: l.read,
     );
     if (request == null || !mounted) return;
-    setState(() {
-      _lastRead = null;
-      _previewError = null;
-    });
     final (index, length) = request;
     final card = _card;
     final sfi = _address?.sfi ?? 0;
-    final response = await _withAccess(
-      record ? l.cpu_manage_read_record : l.cpu_manage_read_binary,
-      () => record
+    await _readSelected((
+      index: index,
+      record: record,
+      send: () => record
           ? card.readRecord(index, length, sfi: sfi)
           : shortBinary
           ? card.readBinarySfi(sfi, index, length)
@@ -878,13 +1044,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
               length,
               maxBlock: math.min(256, entry?.type4Header?.maxRead ?? 256),
             ),
-    );
-    if (mounted)
-      setState(() {
-        _showRead(response, index: index, record: record);
-        if (record) _recordNumber = index;
-      });
-    _message(_status(response.status));
+    ));
   }
 
   Future<void> _write({required bool record}) async {
@@ -1001,10 +1161,11 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                       askedForAccess = true;
                     rethrow;
                   }
-                });
+                }, fmcosPermission: file.fmcosEf?.writeAccess);
               },
             ),
       allowAuthentication: record,
+      fmcosPermission: file.fmcosEf?.writeAccess,
       invalidate: _address,
       successDetail: l.cpu_manage_write_count(data.length),
     );
@@ -1024,7 +1185,9 @@ class _CpuCardManagerState extends State<CpuCardManager> {
 
   bool get _canCreateHere =>
       _file?.isDirectory == true &&
-      _file!.canChange &&
+      (_fmcosMode
+          ? _address != null && _file!.isFmcosDirectory
+          : _file!.canChange) &&
       !_knownType4(_file!, _address) &&
       _address?.metadataOnly != true &&
       (_file!.fid != null || _file!.aid != null);
@@ -1087,9 +1250,11 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   }
 
   Future<void> _create(CpuLiveFileKind kind) async {
-    if (_file?.isFmcosMaster == true) {
-      if (kind == CpuLiveFileKind.directory)
-        await _createFmcosDirectory(_file!);
+    if (!_canCreateHere) throw StateError(_l.cpu_manage_no_create_target);
+    final parent = _file!, parentAddress = _directoryAddress;
+    final fmcos = _fmcosMode;
+    if (fmcos && kind == CpuLiveFileKind.directory) {
+      await _createFmcosDirectory(parent, parentAddress!);
       return;
     }
     final l = _l;
@@ -1106,6 +1271,10 @@ class _CpuCardManagerState extends State<CpuCardManager> {
           _Field(l.cpu_manage_new_record_length, number: true),
           _Field(l.cpu_manage_record_count, number: true),
         ],
+        if (fmcos) ...[
+          _Field(l.cpu_manage_fmcos_read_access, initial: 'F0'),
+          _Field(l.cpu_manage_fmcos_write_access, initial: 'F1'),
+        ],
       ],
       (values) {
         final fid = _mutationFid(values.first);
@@ -1116,13 +1285,37 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         final recordLength = !dir && !binary
             ? _decimal(values[1], 1, 255)
             : null;
-        final count = !dir && !binary ? _decimal(values[2], 1, 254) : null;
-        return (fid, aid, size, recordLength, count);
+        final count = !dir && !binary
+            ? _decimal(values[2], fmcos ? 2 : 1, 254)
+            : null;
+        final readAccess = fmcos
+            ? cpuHex(values[values.length - 2], min: 1, max: 1).single
+            : null;
+        final writeAccess = fmcos
+            ? cpuHex(values.last, min: 1, max: 1).single
+            : null;
+        final ef = !fmcos
+            ? null
+            : binary
+            ? CpuFmcosEf.binary(
+                size: size!,
+                readAccess: readAccess!,
+                writeAccess: writeAccess!,
+              )
+            : CpuFmcosEf.fixedRecords(
+                recordLength: recordLength!,
+                recordCount: count!,
+                readAccess: readAccess!,
+                writeAccess: writeAccess!,
+              );
+        return (fid, aid, size, recordLength, count, ef);
       },
-      help: l.cpu_manage_create_help,
+      help: fmcos
+          ? l.cpu_manage_fmcos_create_ef_help
+          : l.cpu_manage_create_help,
     );
     if (command == null || !mounted) return;
-    final (fid, aid, size, length, count) = command;
+    final (fid, aid, size, length, count, ef) = command;
     await _mutate(
       title,
       [
@@ -1131,32 +1324,47 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         if (size != null) l.cpu_manage_bytes(size),
         if (length != null && count != null)
           '$count × ${l.cpu_manage_bytes(length)}',
+        if (ef != null) ...[
+          '${l.cpu_manage_fmcos_read_access}: ${_hex(ef.readAccess, 2)}',
+          '${l.cpu_manage_fmcos_write_access}: ${_hex(ef.writeAccess, 2)}',
+        ],
       ].join('\n'),
-      () => _card.createFile(
-        fid,
-        kind,
-        aid: aid,
-        size: size,
-        recordLength: length,
-        recordCount: count,
-      ),
+      () => ef != null
+          ? _card.createFmcosEf(fid, parent: parent, ef: ef)
+          : _card.createFile(
+              fid,
+              kind,
+              aid: aid,
+              size: size,
+              recordLength: length,
+              recordCount: count,
+            ),
       directoryChange: true,
-      onSuccess: _directoryAddress == null
+      fmcosPermission: _fmcosDirectories[parentAddress?.display]?.create,
+      rejectionNote: ef != null
+          ? (word) => word == 0x6A86 ? l.cpu_manage_file_exists : null
+          : null,
+      onSuccess: parentAddress == null
           ? null
           : () {
+              final address = parentAddress.child(fid);
+              if (ef != null) _fmcosFiles[address.display] = ef;
               _tree.add(
                 CpuDirectoryEntry(
-                  _directoryAddress!.child(fid),
+                  address,
                   kind: kind,
                   applicationAid: aid,
-                  capacity: size,
+                  capacity: ef?.size ?? size,
                 ),
               );
             },
     );
   }
 
-  Future<void> _createFmcosDirectory(CpuLiveFile parent) async {
+  Future<void> _createFmcosDirectory(
+    CpuLiveFile parent,
+    CpuFileAddress parentAddress,
+  ) async {
     final l = _l;
     final title = l.cpu_manage_fmcos_create;
     final input = await _prompt(
@@ -1184,7 +1392,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     );
     if (input == null || !mounted) return;
     final (fid, name, size, permissions) = input;
-    final address = const CpuFileAddress.master().child(fid);
+    final address = parentAddress.child(fid);
     await _mutate(
       title,
       [
@@ -1204,15 +1412,22 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         applicationFileId: permissions[2],
       ),
       directoryChange: true,
+      fmcosPermission: _fmcosDirectories[parentAddress.display]?.create,
       rejectionNote: (word) => word == 0x6A86 ? l.cpu_manage_file_exists : null,
-      onSuccess: () => _tree.add(
-        CpuDirectoryEntry(
-          address,
-          kind: CpuLiveFileKind.directory,
-          applicationAid: name,
-          capacity: size,
-        ),
-      ),
+      onSuccess: () {
+        _fmcosDirectories[address.display] = (
+          create: permissions[0],
+          erase: permissions[1],
+        );
+        _tree.add(
+          CpuDirectoryEntry(
+            address,
+            kind: CpuLiveFileKind.directory,
+            applicationAid: name,
+            capacity: size,
+          ),
+        );
+      },
     );
   }
 
@@ -1308,6 +1523,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     bool invalidateSubtree = false,
     String? successDetail,
     String? Function(int)? rejectionNote,
+    int? fmcosPermission,
   }) async {
     final l = _l;
     if (!_active || _file == null) throw StateError(l.cpu_manage_session_lost);
@@ -1345,7 +1561,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     });
     try {
       final response = allowAuthentication
-          ? await _withAccess(title, send)
+          ? await _withAccess(title, send, fmcosPermission: fmcosPermission)
           : await send();
       if (!mounted) return;
       if (directoryChange)
@@ -1648,12 +1864,13 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     required bool named,
     required bool hasCatalog,
     bool canRead = true,
-    bool fmcosMaster = false,
+    bool fmcos = false,
   }) {
     final l = _l;
     canChange = canChange && address?.metadataOnly != true;
     final canDelete =
         canChange &&
+        !fmcos &&
         address?.parent != null &&
         address!.fid != null &&
         !const [0, 0x3F00, 0x3FFF, 0xFFFF].contains(address.fid);
@@ -1699,13 +1916,13 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         add(
           _Command.createDf,
           Icons.create_new_folder_outlined,
-          fmcosMaster
+          fmcos
               ? l.cpu_manage_fmcos_create
               : _createLabel(CpuLiveFileKind.directory),
           () => _create(CpuLiveFileKind.directory),
         );
       }
-      if (canChange && named && !fmcosMaster) {
+      if (canChange && named) {
         add(
           _Command.createBinary,
           Icons.note_add_outlined,
@@ -1718,12 +1935,13 @@ class _CpuCardManagerState extends State<CpuCardManager> {
           _createLabel(CpuLiveFileKind.record),
           () => _create(CpuLiveFileKind.record),
         );
-        add(
-          _Command.deleteChild,
-          Icons.delete_outline,
-          l.cpu_manage_delete_child,
-          _deleteChild,
-        );
+        if (!fmcos)
+          add(
+            _Command.deleteChild,
+            Icons.delete_outline,
+            l.cpu_manage_delete_child,
+            _deleteChild,
+          );
       }
     } else {
       if (canRead && address?.display == '3F00/2F00') {
@@ -1785,7 +2003,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         _deleteSelection,
       );
     }
-    if (canChange && !fmcosMaster)
+    if (canChange && !fmcos)
       add(
         _Command.changePin,
         Icons.password,
@@ -1798,13 +2016,15 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   List<_FileAction> _actionsFor(CpuLiveFile file) => _fileActions(
     file.kind,
     _address,
-    canChange: file.canChange && !_knownType4(file, _address),
+    canChange:
+        !_knownType4(file, _address) &&
+        (_fmcosMode && file.isDirectory ? _canCreateHere : file.canChange),
     canRead:
         !file.hasDataObjects &&
         !file.isInternalEf &&
         (_selectedEntry?.type4File?.readAccess ?? 0) == 0,
     named: file.fid != null || file.aid != null,
-    fmcosMaster: file.isFmcosMaster,
+    fmcos: _fmcosMode,
     hasCatalog:
         (_address?.sfi != null && _address?.shortBinary != true) ||
         (_address?.metadataOnly == true && file.directorySfi != null),
@@ -1826,7 +2046,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                     cpuAidHex(cpuType4Aid),
             canRead: (entry.type4File?.readAccess ?? 0) == 0,
             named: address.fid != null || address.aid != null,
-            fmcosMaster: entry.isMaster && _fmcosMode,
+            fmcos: _fmcosMode,
             hasCatalog:
                 (address.sfi != null && !address.shortBinary) ||
                 _tree
@@ -2337,6 +2557,8 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     final maxRecord = math.min(file?.recordCount ?? 254, _lastRecordInFile);
     final entry = _selectedEntry;
     final inline = _inlineDirectory(file);
+    final fmcosDirectory = _fmcosDirectories[address?.display];
+    final blockedRead = _blockedRead;
     return Card(
       margin: EdgeInsets.zero,
       clipBehavior: Clip.antiAlias,
@@ -2438,6 +2660,16 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                         color: Theme.of(context).colorScheme.error,
                       ),
                     ),
+                  if (blockedRead != null)
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: _button(
+                        Icons.lock_open_outlined,
+                        l.cpu_tree_authenticate_read,
+                        () =>
+                            _run(() => _readSelected(blockedRead, retry: true)),
+                      ),
+                    ),
                   if (read != null) ...[
                     if (address?.sfi != null &&
                         address?.shortBinary != true &&
@@ -2496,6 +2728,28 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                     value: _selectionLabel(file),
                   ),
                   CpuInfoRow(label: l.cpu_files_type, value: _kind(file.kind)),
+                  if (file.fmcosEf != null || fmcosDirectory != null)
+                    Text(l.cpu_manage_fmcos_recorded_access),
+                  if (file.fmcosEf case final ef?) ...[
+                    CpuInfoRow(
+                      label: l.cpu_manage_fmcos_read_access,
+                      value: _hex(ef.readAccess, 2),
+                    ),
+                    CpuInfoRow(
+                      label: l.cpu_manage_fmcos_write_access,
+                      value: _hex(ef.writeAccess, 2),
+                    ),
+                  ],
+                  if (fmcosDirectory != null) ...[
+                    CpuInfoRow(
+                      label: l.cpu_manage_fmcos_create_access,
+                      value: _hex(fmcosDirectory.create, 2),
+                    ),
+                    CpuInfoRow(
+                      label: l.cpu_manage_fmcos_erase_access,
+                      value: _hex(fmcosDirectory.erase, 2),
+                    ),
+                  ],
                   if (file.directorySfi != null || address?.sfi != null)
                     CpuInfoRow(
                       label: address?.shortBinary == true

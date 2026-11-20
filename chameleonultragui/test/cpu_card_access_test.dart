@@ -28,6 +28,36 @@ class _CardScript {
 
 void main() {
   test(
+    'FMCOS record creation places count, length and both ACL bytes separately',
+    () async {
+      final script = _CardScript([
+        ('80E00008072A031401F2FFFF', '9000'),
+        ('00A40000020008', '9000'),
+      ]);
+      final card = CpuCardAccess(script.transmit, useFmcosMaster: true);
+      final parent = CpuLiveFile.fromSelect(
+        cpuHex('6F0984055445535431A500'),
+        directory: true,
+        typedSelection: false,
+        fid: 0x1100,
+      );
+      final ef = CpuFmcosEf.fixedRecords(
+        recordLength: 20,
+        recordCount: 3,
+        readAccess: 0x01,
+        writeAccess: 0xF2,
+      );
+      await card.createFmcosEf(0x0008, parent: parent, ef: ef);
+      final selected = await card.selectFile(0x0008, directory: false);
+      final file = selected.withCreatedFmcosEf(ef);
+      expect(file.fixedRecordLength, isTrue);
+      expect(file.recordLength, 20);
+      expect(file.recordCount, 3);
+      script.done();
+    },
+  );
+
+  test(
     'binary writes advance by confirmed blocks and report a stopped transfer',
     () async {
       final first = List.filled(255, 'AA').join();
