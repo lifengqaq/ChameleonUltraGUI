@@ -300,6 +300,64 @@ void main() {
   );
 
   testWidgets(
+    'reads a passbook from the PSE parent of a catalog record without selecting MF',
+    (tester) async {
+      const mfFcp = '62088202382183023F009000';
+      const pse = '00A404000E315041592E5359532E444446303100';
+      final card = _Card([
+        ('00A40000023F0000', mfFcp),
+        ('00A40200022F0000', '6A82'),
+        (pse, _directoryFci),
+        ('00B2010C00', '${_directoryRecord}9000'),
+        ('00B2020C00', '6A83'),
+        ('00A404000E325041592E5359532E444446303100', '6A82'),
+        ('00A4040007D276000085010100', '6A82'),
+        ('00A40000023F0000', mfFcp),
+        (pse, _directoryFci),
+        ('00B2010C00', '${_directoryRecord}9000'),
+        ('805C000104', '6982'),
+        ('0020000203123456', '9000'),
+        ('805C000104', '000030399000'),
+        ('00A40000023F0000', mfFcp),
+      ]);
+      final l = await _openExplorer(tester, card);
+      await tester.tap(find.text(l.cpu_tree_record_file));
+      await tester.pumpAndSettle();
+      expect(card.exchanges, 10);
+      await tester.tap(
+        find.widgetWithText(OutlinedButton, l.cpu_manage_balance_action),
+      );
+      await tester.pumpAndSettle();
+      final scope = l.cpu_manage_balance_scope(
+        'PSE · AID 315041592E5359532E4444463031',
+      );
+      expect(find.text(scope), findsOneWidget);
+      await tester.tap(
+        find.widgetWithText(OutlinedButton, l.cpu_manage_balance_passbook),
+      );
+      await tester.pumpAndSettle();
+      expect(card.exchanges, 11);
+      expect(find.text(l.cpu_auth_fmcos_pin), findsOneWidget);
+      await tester.enterText(
+        find.byKey(const PageStorageKey('cpu-auth-reference')),
+        '02',
+      );
+      await tester.enterText(
+        find.byKey(const PageStorageKey('cpu-auth-credential')),
+        '123456',
+      );
+      await tester.tap(find.byKey(const ValueKey('cpu-auth-submit')));
+      await tester.pumpAndSettle();
+      expect(find.text(l.cpu_manage_balance_minor(12345)), findsOneWidget);
+      expect(find.text(scope), findsOneWidget);
+      await tester.tap(find.text('MF'));
+      await tester.pumpAndSettle();
+      expect(find.text(l.cpu_manage_balance_minor(12345)), findsNothing);
+      expect(card.exchanges, card.script.length);
+    },
+  );
+
+  testWidgets(
     'saves the discovered directory and raw records after RF is closed',
     (tester) async {
       SharedPreferences.setMockInitialValues({});

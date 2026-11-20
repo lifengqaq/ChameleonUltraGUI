@@ -1,5 +1,12 @@
 {
   "cpu_manage_purse_balance": "电子钱包余额",
+  "cpu_manage_balance_passbook": "电子存折余额",
+  "cpu_manage_balance_action": "钱包／存折余额",
+  "cpu_manage_balance_scope": "查询目录：{directory}",
+  "cpu_manage_balance_help": "选择要按 FMCOS 2.0 查询的类型。电子存折可能需要验证当前目录配置的 PIN。",
+  "cpu_manage_balance_select": "请先选中钱包或存折所在的目录。",
+  "cpu_manage_balance_other_profile": "这个应用不适用 FMCOS 2.0 的余额查询。",
+  "cpu_manage_balance_minor": "{amount}（最小货币单位）",
   "cpu_manage_purse_amount": "{amount} 元",
   "cpu_manage_purse_refresh": "查询余额",
   "cpu_manage_purse_reading": "正在读取卡片…",

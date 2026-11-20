@@ -9,6 +9,14 @@ import 'package:chameleonultragui/helpers/iso14443_4.dart';
 
 enum CpuLiveFileKind { directory, binary, record, unknown }
 
+enum CpuBalanceKind {
+  passbook(0x01),
+  purse(0x02);
+
+  const CpuBalanceKind(this.p2);
+  final int p2;
+}
+
 bool _selectVariantRejected(int status) =>
     const [0x6700, 0x6A81, 0x6A82, 0x6A86, 0x6D00].contains(status) ||
     status >> 8 == 0x6C;
@@ -606,12 +614,13 @@ class CpuCardAccess {
     );
   }
 
-  /// City Union electronic purse (EP). The matching DF must be selected.
+  /// FMCOS 2.0 GET BALANCE (also used by the legacy City Union purse).
+  /// This refers to the current DF, even when an EF is selected in it.
   /// Return the card's big-endian binary amount in minor units on 9000 only.
-  Future<int> readCityUnionPurseBalance() async {
-    final reply = await _send([0x80, 0x5C, 0x00, 0x02, 0x04]);
+  Future<int> readBalance(CpuBalanceKind kind) async {
+    final reply = await _send([0x80, 0x5C, 0x00, kind.p2, 0x04]);
     if (reply.data.length != 4 || (reply.data.first & 0x80) != 0) {
-      throw const FormatException('Unexpected electronic purse balance format');
+      throw const FormatException('Unexpected card balance format');
     }
     return ByteData.sublistView(reply.data).getUint32(0, Endian.big);
   }

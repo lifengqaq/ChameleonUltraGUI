@@ -32,6 +32,13 @@ import 'package:provider/provider.dart';
 
 typedef _Link = ({ChameleonCommunicator device, Uint8List id});
 
+typedef _BalancePreview = ({
+  CpuBalanceKind kind,
+  bool fmcos,
+  int? amount,
+  String? error,
+});
+
 enum _Command {
   open,
   openDf,
@@ -85,8 +92,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
   final _missingAids = <String>{};
   CpuFileReply? _lastRead;
   ({int index, bool record}) _readPosition = (index: 0, record: false);
-  int? _purseBalance;
-  String? _purseError;
+  _BalancePreview? _balance;
   String? _previewError;
   int _recordNumber = 1;
   int _lastRecordInFile = 254;
@@ -106,6 +112,16 @@ class _CpuCardManagerState extends State<CpuCardManager> {
       ? CpuTransitInfoProfile.forAid(_file?.aid ?? _address?.aid)
       : null;
   bool get _purseSelected => _transitProfile == CpuTransitInfoProfile.cityUnion;
+  List<int>? get _balanceAid {
+    final directory = _directoryAddress;
+    if (directory == null) return null;
+    return _directory?.aid ??
+        _tree.at(directory)?.applicationAid ??
+        directory.aid;
+  }
+
+  CpuTransitInfoProfile? get _balanceTransitProfile =>
+      CpuTransitInfoProfile.forAid(_balanceAid);
   CpuDirectoryEntry? get _selectedEntry =>
       _address == null ? null : _tree.at(_address!);
   bool get _canArchive => _identity != null && !_tree.isEmpty;
@@ -132,8 +148,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     _masterIssue = null;
     _directoryAddress = null;
     _lastRead = null;
-    _purseBalance = null;
-    _purseError = null;
+    _balance = null;
     _previewError = null;
     _recordNumber = 1;
     _lastRecordInFile = 254;
@@ -292,11 +307,16 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     ).inDirectory(_directoryAddress?.display ?? '');
   }
 
-  Future<T> _withAccess<T>(String operation, Future<T> Function() send) {
+  Future<T> _withAccess<T>(
+    String operation,
+    Future<T> Function() send, {
+    CpuAuthSettings? initial,
+    String? scopeLabel,
+  }) {
     final file = _file!;
     final link = _link;
     final card = _card;
-    final scope = _selectionLabel(file);
+    final scope = scopeLabel ?? _selectionLabel(file);
     final history = _scopeHistory();
     bool sameSelection() =>
         mounted && _active && _link == link && _file == file;
@@ -308,12 +328,14 @@ class _CpuCardManagerState extends State<CpuCardManager> {
           context,
           exchange: card.exchange,
           history: history,
-          initial: _fmcosMode
-              ? const CpuAuthSettings(
-                  profile: CpuAuthProfile.fmcos20,
-                  method: CpuAuthMethod.des,
-                )
-              : const CpuAuthSettings(),
+          initial:
+              initial ??
+              (_fmcosMode
+                  ? const CpuAuthSettings(
+                      profile: CpuAuthProfile.fmcos20,
+                      method: CpuAuthMethod.des,
+                    )
+                  : const CpuAuthSettings()),
           prefillCredential: false,
           operation: '$operation\n$scope\n${_status(0x6982)}',
         );
@@ -619,24 +641,93 @@ class _CpuCardManagerState extends State<CpuCardManager> {
       _archive.read(address, reply, index, record);
   }
 
-  Future<void> _readPurseBalance() async {
-    final file = _file;
-    if (!mounted || !_active || !_purseSelected) return;
+  String _balanceTitle(AppLocalizations l, CpuBalanceKind kind) =>
+      switch (kind) {
+        CpuBalanceKind.passbook => l.cpu_manage_balance_passbook,
+        CpuBalanceKind.purse => l.cpu_manage_purse_balance,
+      };
+
+  String _balanceScopeLabel(CpuFileAddress address) {
+    final label = _tree.at(address)?.label;
+    return label == null || label.isEmpty
+        ? address.display
+        : '$label · ${address.display}';
+  }
+
+  Future<void> _chooseBalance() async {
+    final l = _l;
+    final directory = _directoryAddress;
+    if (directory == null || _file == null) {
+      _message(l.cpu_manage_balance_select, problem: true);
+      return;
+    }
+    if (_balanceTransitProfile == CpuTransitInfoProfile.tUnion ||
+        cpuAidHex(_balanceAid ?? const []) == cpuAidHex(cpuType4Aid)) {
+      _message(l.cpu_manage_balance_other_profile, problem: true);
+      return;
+    }
+    final kind = await showDialog<CpuBalanceKind>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(l.cpu_manage_balance_action),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(l.cpu_manage_balance_scope(_balanceScopeLabel(directory))),
+            const SizedBox(height: 8),
+            Text(l.cpu_manage_balance_help),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(l.cancel),
+          ),
+          for (final kind in CpuBalanceKind.values)
+            OutlinedButton(
+              onPressed: () => Navigator.pop(context, kind),
+              child: Text(_balanceTitle(l, kind)),
+            ),
+        ],
+      ),
+    );
+    if (kind != null && mounted) await _readBalance(kind, fmcos: true);
+  }
+
+  Future<void> _readBalance(CpuBalanceKind kind, {required bool fmcos}) async {
+    final file = _file, directory = _directoryAddress, link = _link;
+    if (!mounted || !_active || file == null || directory == null) return;
+    final l = _l;
     final card = _card;
-    setState(() {
-      _purseBalance = null;
-      _purseError = null;
-    });
+    void show({int? amount, String? error}) {
+      if (mounted && _active && _link == link && identical(_file, file)) {
+        setState(
+          () => _balance = (
+            kind: kind,
+            fmcos: fmcos,
+            amount: amount,
+            error: error,
+          ),
+        );
+      }
+    }
+
+    show();
     try {
-      final balance = await card.readCityUnionPurseBalance();
-      if (mounted && identical(_file, file))
-        setState(() => _purseBalance = balance);
+      final balance = await _withAccess(
+        _balanceTitle(l, kind),
+        () => card.readBalance(kind),
+        initial: fmcos || _fmcosMode
+            ? const CpuAuthSettings(profile: CpuAuthProfile.fmcos20)
+            : const CpuAuthSettings(),
+        scopeLabel: _balanceScopeLabel(directory),
+      );
+      show(amount: balance);
     } on CpuFileStatus catch (error) {
-      if (mounted && identical(_file, file))
-        setState(() => _purseError = _status(error.word));
+      if (mounted) show(error: _status(error.word));
     } on FormatException {
-      if (mounted && identical(_file, file))
-        setState(() => _purseError = _l.cpu_manage_purse_bad_response);
+      show(error: l.cpu_manage_purse_bad_response);
     }
   }
 
@@ -664,8 +755,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
       _file = CpuLiveFile.shortFile(binary: true);
       _address = address;
       _previewError = null;
-      _purseBalance = null;
-      _purseError = null;
+      _balance = null;
       _showRead(reply, index: 0, record: false);
     });
     _message(_status(reply.status));
@@ -1882,6 +1972,11 @@ class _CpuCardManagerState extends State<CpuCardManager> {
               _canArchive ? () => _run(_saveDirectory) : null,
             ),
             _button(
+              Icons.account_balance_wallet_outlined,
+              l.cpu_manage_balance_action,
+              active ? () => _run(_chooseBalance) : null,
+            ),
+            _button(
               Icons.edit_note,
               l.cpu_manage_write_file,
               active ? () => _run(_writeFile) : null,
@@ -2317,7 +2412,7 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                     Text(l.cpu_tree_pick_entry),
                 ] else ...[
                   if (file.isFmcosMaster) Text(l.cpu_manage_fmcos_selected),
-                  if (_purseSelected) _pursePane(l),
+                  if (_purseSelected || _balance != null) _balancePane(l),
                   if (_transitProfile case final profile?) ...[
                     CpuInfoRow(
                       label: l.cpu_transit_profile,
@@ -2458,11 +2553,18 @@ class _CpuCardManagerState extends State<CpuCardManager> {
     );
   }
 
-  Widget _pursePane(AppLocalizations l) {
-    final balance = _purseBalance, error = _purseError;
-    final display = balance == null
+  Widget _balancePane(AppLocalizations l) {
+    final state = _balance;
+    final amount = state?.amount, error = state?.error;
+    final kind = state?.kind ?? CpuBalanceKind.purse;
+    final directory = _directoryAddress;
+    final display = amount == null
         ? null
-        : '${balance ~/ 100}.${(balance % 100).toString().padLeft(2, '0')}';
+        : _balanceTransitProfile == CpuTransitInfoProfile.cityUnion
+        ? l.cpu_manage_purse_amount(
+            '${amount ~/ 100}.${(amount % 100).toString().padLeft(2, '0')}',
+          )
+        : l.cpu_manage_balance_minor(amount);
     return Card.outlined(
       margin: const EdgeInsets.only(bottom: 12),
       child: Padding(
@@ -2476,14 +2578,15 @@ class _CpuCardManagerState extends State<CpuCardManager> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    l.cpu_manage_purse_balance,
+                    _balanceTitle(l, kind),
                     style: Theme.of(context).textTheme.titleSmall,
                   ),
-                  if (display != null)
+                  if (directory != null)
                     Text(
-                      l.cpu_manage_purse_amount(display),
-                      style: Theme.of(context).textTheme.titleLarge,
-                    )
+                      l.cpu_manage_balance_scope(_balanceScopeLabel(directory)),
+                    ),
+                  if (display != null)
+                    Text(display, style: Theme.of(context).textTheme.titleLarge)
                   else if (error != null)
                     Text(
                       error,
@@ -2505,7 +2608,11 @@ class _CpuCardManagerState extends State<CpuCardManager> {
               child: OutlinedButton.icon(
                 icon: const Icon(Icons.refresh),
                 label: Text(l.cpu_manage_purse_refresh),
-                onPressed: _busy ? null : () => _run(_readPurseBalance),
+                onPressed: _busy
+                    ? null
+                    : () => _run(
+                        () => _readBalance(kind, fmcos: state?.fmcos ?? false),
+                      ),
               ),
             ),
           ],
