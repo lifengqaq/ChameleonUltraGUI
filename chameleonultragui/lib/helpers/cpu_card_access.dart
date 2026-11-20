@@ -15,10 +15,6 @@ bool _selectVariantRejected(int status) =>
 
 const cpuPseName = '1PAY.SYS.DDF01';
 const cpuPpseName = '2PAY.SYS.DDF01';
-const _cityUnionPurseAid = [0xA0, 0, 0, 0, 3, 0x86, 0x98, 7, 1];
-
-bool cpuIsCityUnionPurse(List<int>? aid) =>
-    aid != null && _cpuBytesEqual(aid, _cityUnionPurseAid);
 
 bool cpuIsPaymentDirectoryName(List<int>? name) =>
     name != null &&
@@ -54,6 +50,13 @@ class CpuFileReply {
   CpuFileReply(Uint8List response)
     : status = response[response.length - 2] << 8 | response.last,
       data = response.sublist(0, response.length - 2);
+  CpuFileReply.fromData(this.data, this.status);
+}
+
+class CpuPartialWrite implements Exception {
+  final int confirmedBytes;
+  final Object cause;
+  const CpuPartialWrite(this.confirmedBytes, this.cause);
 }
 
 class CpuLiveFile {
@@ -64,6 +67,36 @@ class CpuLiveFile {
   final bool canChange;
   final String label;
   final int? directorySfi;
+  int? get descriptor => controlFields[0x82]?.firstOrNull;
+  bool get fixedRecordLength =>
+      kind == CpuLiveFileKind.record &&
+      const {2, 3, 6, 7}.contains((descriptor ?? 0) & 7);
+  bool get hasDataObjects => (descriptor ?? 0) & 0xBF == 0x39;
+  bool get isInternalEf => (descriptor ?? 0) & 0xB8 == 0x08;
+  late final Map<int, Uint8List> controlFields = _readControlFields();
+  Map<int, Uint8List> _readControlFields() {
+    final fci = _cpuField(control, 0x6F);
+    final fcp = _cpuField(control, 0x62) ?? _cpuField(fci, 0x62);
+    return Map.unmodifiable({
+      for (final tag in const [
+        0x80,
+        0x81,
+        0x82,
+        0x83,
+        0x84,
+        0x86,
+        0x88,
+        0x8A,
+        0x8B,
+        0x8C,
+        0xAB,
+      ])
+        if (_cpuField(fcp ?? fci, tag) ??
+                (tag == 0x84 ? _cpuField(fci, tag) : null)
+            case final value?)
+          tag: value,
+    });
+  }
 
   bool get isDirectory => kind == CpuLiveFileKind.directory;
   bool get supportsBinary =>
@@ -84,9 +117,9 @@ class CpuLiveFile {
     this.directorySfi,
   });
 
-  factory CpuLiveFile.directoryRecords() => CpuLiveFile._(
+  factory CpuLiveFile.shortFile({bool binary = false}) => CpuLiveFile._(
     Uint8List(0),
-    CpuLiveFileKind.record,
+    binary ? CpuLiveFileKind.binary : CpuLiveFileKind.record,
     null,
     null,
     null,
@@ -104,9 +137,7 @@ class CpuLiveFile {
     int? fid,
     Uint8List? aid,
   }) {
-    Uint8List? firstField(Uint8List? data, int tag) => data == null
-        ? null
-        : cpuFindTlv(data, tag, recursive: false).firstOrNull;
+    final firstField = _cpuField;
     final fci = firstField(control, 0x6F);
     final params = firstField(control, 0x62) ?? firstField(fci, 0x62) ?? fci;
     Uint8List? field(int tag) => firstField(params, tag);
@@ -114,8 +145,10 @@ class CpuLiveFile {
     final flags = descriptor?.firstOrNull;
     final kind = flags == null || flags & 0x80 != 0
         ? null
-        : flags & 0x38 == 0x38
+        : flags & 0x3F == 0x38
         ? CpuLiveFileKind.directory
+        : flags & 0x38 == 0x38
+        ? null
         : switch (flags & 7) {
             1 => CpuLiveFileKind.binary,
             >= 2 => CpuLiveFileKind.record,
@@ -165,12 +198,16 @@ class CpuLiveFile {
       !readOnly &&
           !namedPaymentDirectory &&
           !cpuIsPaymentDirectoryName(dfName) &&
+          (flags == null || flags & 0xB8 != 0x08 && flags & 0xBF != 0x39) &&
           (typedSelection || kind != null),
       cpuDirectoryLabel(firstField(proprietary, 0x50) ?? field(0x50)),
       directorySfi: sfi,
     );
   }
 }
+
+Uint8List? _cpuField(Uint8List? data, int tag) =>
+    data == null ? null : cpuFindTlv(data, tag, recursive: false).firstOrNull;
 
 int _cpuFileInt(Iterable<int> data) =>
     data.fold(0, (value, byte) => value << 8 | byte);
@@ -485,6 +522,37 @@ class CpuCardAccess {
     ], reading: true);
   }
 
+  Future<CpuFileReply> readBinarySfi(int sfi, int offset, int length) {
+    RangeError.checkValueInInterval(sfi, 1, 30, 'SFI');
+    RangeError.checkValueInInterval(offset, 0, 255, 'Offset');
+    RangeError.checkValueInInterval(length, 1, 256 - offset, 'Length');
+    return _send([0, 0xB0, 0x80 | sfi, offset, length & 255], reading: true);
+  }
+
+  Future<CpuFileReply> readBinaryRange(
+    int offset,
+    int length, {
+    int maxBlock = 256,
+    Future<CpuFileReply> Function(int offset, int length)? read,
+  }) async {
+    _binaryBounds(offset, length, 32768);
+    RangeError.checkValueInInterval(maxBlock, 1, 256);
+    final data = BytesBuilder(copy: false);
+    var status = 0x9000;
+    while (data.length < length) {
+      final position = offset + data.length;
+      final block = math.min(maxBlock, length - data.length);
+      final reply = await (read ?? readBinary)(position, block);
+      if (reply.data.length > block) {
+        throw const FormatException('READ BINARY exceeded Le');
+      }
+      data.add(reply.data);
+      status = reply.status;
+      if (status == 0x6282 || reply.data.length < block) break;
+    }
+    return CpuFileReply.fromData(data.takeBytes(), status);
+  }
+
   Future<CpuFileReply> updateBinary(int offset, Uint8List data) {
     _binaryBounds(offset, data.length, 255);
     return _send([
@@ -495,6 +563,29 @@ class CpuCardAccess {
       data.length,
       ...data,
     ], mutation: true);
+  }
+
+  /// Advance only after a confirmed write; report any previous blocks on failure.
+  Future<CpuFileReply> updateBinaryRange(
+    int offset,
+    Uint8List data, {
+    Future<CpuFileReply> Function(int offset, Uint8List block)? write,
+  }) async {
+    _binaryBounds(offset, data.length, 32768);
+    var confirmed = 0;
+    CpuFileReply? last;
+    while (confirmed < data.length) {
+      final end = math.min(data.length, confirmed + 255);
+      final block = Uint8List.sublistView(data, confirmed, end);
+      try {
+        last = await (write ?? updateBinary)(offset + confirmed, block);
+      } catch (error) {
+        if (confirmed == 0) rethrow;
+        throw CpuPartialWrite(confirmed, error);
+      }
+      confirmed = end;
+    }
+    return last!;
   }
 
   void _binaryBounds(int offset, int length, int limit) {
@@ -643,16 +734,26 @@ class CpuCardAccess {
   /// Read EF.DIR, which must already be selected; regular records and binary
   /// directories share the same bounded application-template parser.
   Future<List<CpuDirectoryApplication>> readApplicationEntries(
-    CpuLiveFile directory,
-  ) async {
+    CpuLiveFile directory, {
+    void Function(CpuFileReply reply, int index, bool record)? onRead,
+  }) async {
     final records = <Uint8List>[];
+    Future<void> addBinary() async {
+      final length = math.min(directory.size ?? 4096, 4096);
+      if (length == 0) return;
+      final reply = await readBinaryRange(0, length);
+      onRead?.call(reply, 0, false);
+      records.add(reply.data);
+    }
+
     if (directory.kind == CpuLiveFileKind.binary) {
-      records.add(await _readDirectoryBinary(directory.size));
+      await addBinary();
     } else {
       final count = math.min(directory.recordCount ?? 32, 32);
       for (var number = 1; number <= count; number++) {
         try {
           final reply = await readRecord(number, 256);
+          onRead?.call(reply, number, true);
           if (reply.data.isEmpty) break;
           records.add(reply.data);
           if (reply.status == 0x6282) break;
@@ -662,23 +763,11 @@ class CpuCardAccess {
               number != 1 ||
               directory.kind != CpuLiveFileKind.unknown)
             rethrow;
-          records.add(await _readDirectoryBinary(directory.size));
+          await addBinary();
           break;
         }
       }
     }
     return cpuDirectoryApplications(records);
-  }
-
-  Future<Uint8List> _readDirectoryBinary(int? size) async {
-    final maximum = math.min(size ?? 4096, 4096);
-    final data = BytesBuilder(copy: false);
-    while (data.length < maximum) {
-      final length = math.min(256, maximum - data.length);
-      final reply = await readBinary(data.length, length);
-      data.add(reply.data);
-      if (reply.status == 0x6282 || reply.data.length != length) break;
-    }
-    return data.takeBytes();
   }
 }

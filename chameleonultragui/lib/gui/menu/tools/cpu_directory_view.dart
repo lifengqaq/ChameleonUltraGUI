@@ -43,7 +43,7 @@ class _CpuDirectoryViewState extends State<CpuDirectoryView> {
         : entry.kind == CpuLiveFileKind.record
         ? 'EF · ${l.cpu_manage_record_kind}'
         : 'EF';
-    final title = address.sfi != null
+    final title = address.sfi != null && !address.shortBinary
         ? l.cpu_tree_record_file
         : entry.label.isEmpty
         ? address.entryLabel
@@ -51,8 +51,8 @@ class _CpuDirectoryViewState extends State<CpuDirectoryView> {
     final size = entry.capacity;
     final details = [
       entry.isMaster ? '3F00' : kind,
-      if (!entry.isMaster && entry.label.isNotEmpty) address.entryLabel,
-      if (address.sfi != null) address.entryLabel,
+      if (address.sfi != null || !entry.isMaster && entry.label.isNotEmpty)
+        address.entryLabel,
       if (address.aid == null && entry.applicationAid != null)
         'AID ${cpuAidHex(entry.applicationAid!)}',
       if (size != null) l.cpu_tree_capacity(size),

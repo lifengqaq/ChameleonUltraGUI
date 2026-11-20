@@ -1,12 +1,23 @@
-import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:chameleonultragui/helpers/cpu_card_access.dart';
 import 'package:chameleonultragui/helpers/cpu_dump.dart' show cpuFindTlv;
+import 'package:chameleonultragui/helpers/cpu_type4.dart';
 import 'package:chameleonultragui/helpers/iso14443_4.dart' show exchangeCpuApdu;
 
-const cpuType4Aid = [0xD2, 0x76, 0, 0, 0x85, 1, 1];
-const cpuType4CcFid = 0xE103;
+export 'package:chameleonultragui/helpers/cpu_type4.dart'
+    show cpuType4Aid, cpuType4CcFid;
+
+typedef CpuObservedRead = void Function(
+  CpuFileAddress address,
+  CpuFileReply reply,
+  int index,
+  bool record,
+);
+typedef CpuObservedSelect = void Function(
+  CpuFileAddress address,
+  CpuLiveFile file,
+);
 
 /// An unambiguous address: a path under MF, or under a named application.
 /// Never infer a parent from an FCI's FID alone.
@@ -16,11 +27,13 @@ class CpuFileAddress {
   final CpuFileAddress? _branch;
   final int? sfi;
   final bool metadataOnly;
+  final bool shortBinary;
   const CpuFileAddress.master()
     : path = const [],
       aid = null,
       _branch = null,
       sfi = null,
+      shortBinary = false,
       metadataOnly = false;
   CpuFileAddress(
     List<int> path, {
@@ -30,11 +43,19 @@ class CpuFileAddress {
   }) : path = List.unmodifiable(path),
        aid = aid == null ? null : List.unmodifiable(aid),
        _branch = branch,
+       shortBinary = false,
        sfi = null;
   CpuFileAddress.directoryRecords(CpuFileAddress parent, int this.sfi)
     : _branch = parent,
       path = const [],
       aid = null,
+      shortBinary = false,
+      metadataOnly = true;
+  CpuFileAddress.shortBinary(CpuFileAddress parent, int this.sfi)
+    : _branch = parent,
+      path = const [],
+      aid = null,
+      shortBinary = true,
       metadataOnly = true;
 
   int? get fid =>
@@ -64,7 +85,9 @@ class CpuFileAddress {
     ...path.map(cpuFidHex),
   ].join('/');
   String get entryLabel => sfi != null
-      ? 'SFI ${sfi.toString().padLeft(2, '0')}'
+      ? shortBinary
+            ? 'SFI ${sfi!.toRadixString(16).padLeft(2, '0').toUpperCase()}h'
+            : 'SFI ${sfi.toString().padLeft(2, '0')}'
       : fid != null
       ? 'FID ${cpuFidHex(fid!)}'
       : 'AID ${cpuAidHex(aid!)}';
@@ -80,7 +103,7 @@ class CpuFileAddress {
       if (parent!.display != selectedDirectory?.display) {
         await parent!.open(card, directory: true);
       }
-      return CpuLiveFile.directoryRecords();
+      return CpuLiveFile.shortFile(binary: shortBinary);
     }
     if (path.isEmpty) {
       if (aid != null) {
@@ -191,6 +214,8 @@ class CpuDirectoryEntry {
   final List<int>? applicationAid;
   final int? capacity;
   final bool type4;
+  final CpuType4Header? type4Header;
+  final CpuType4File? type4File;
   const CpuDirectoryEntry(
     this.address, {
     required this.kind,
@@ -198,6 +223,8 @@ class CpuDirectoryEntry {
     this.applicationAid,
     this.capacity,
     this.type4 = false,
+    this.type4Header,
+    this.type4File,
   });
 
   bool get isDirectory => kind == CpuLiveFileKind.directory;
@@ -208,6 +235,7 @@ class CpuDirectoryTree {
   final _entries = <String, CpuDirectoryEntry>{};
   bool get isEmpty => _entries.isEmpty;
   CpuDirectoryEntry? at(CpuFileAddress address) => _entries[address.display];
+  Iterable<CpuDirectoryEntry> get entries => _entries.values;
 
   List<CpuDirectoryEntry> childrenOf(CpuFileAddress? parent) => [
     for (final entry in _entries.values)
@@ -232,6 +260,8 @@ class CpuDirectoryTree {
       applicationAid: entry.applicationAid ?? old?.applicationAid,
       capacity: entry.capacity ?? old?.capacity,
       type4: entry.type4 || old?.type4 == true,
+      type4Header: entry.type4Header ?? old?.type4Header,
+      type4File: entry.type4File ?? old?.type4File,
     );
   }
 
@@ -380,6 +410,8 @@ Future<bool> _walkPaymentDirectory(
   CpuFileAddress root,
   CpuLiveFile rootFile, {
   bool records = true,
+  CpuObservedRead? onRead,
+  CpuObservedSelect? onSelect,
 }) async {
   final seen = <String>{};
   var partial = false;
@@ -389,6 +421,7 @@ Future<bool> _walkPaymentDirectory(
       partial = true;
       return;
     }
+    onSelect?.call(address, file);
     final children = <String, _PaymentDirectoryItem>{};
     void addAll(Iterable<_PaymentDirectoryItem> items) {
       for (final item in items) {
@@ -409,6 +442,7 @@ Future<bool> _walkPaymentDirectory(
       for (var record = 1; record <= 24; record++) {
         try {
           final reply = await card.readRecord(record, 256, sfi: sfi);
+          onRead?.call(shortFile, reply, record, true);
           addAll(_paymentItems(reply.data, record: true));
           if (reply.status == 0x6282) break;
           if (record == 24) partial = true;
@@ -450,7 +484,11 @@ Future<bool> _walkPaymentDirectory(
 
 /// Read directory metadata only: no authentication, guessed FIDs, payment
 /// processing or file contents outside the published directory/CC itself.
-Future<CpuDirectoryScan> discoverCpuDirectory(CpuCardAccess card) async {
+Future<CpuDirectoryScan> discoverCpuDirectory(
+  CpuCardAccess card, {
+  CpuObservedRead? onRead,
+  CpuObservedSelect? onSelect,
+}) async {
   final tree = CpuDirectoryTree();
   final statuses = <String, int>{};
   var incomplete = false;
@@ -475,6 +513,7 @@ Future<CpuDirectoryScan> discoverCpuDirectory(CpuCardAccess card) async {
       ? selectedMaster
       : null;
   final actualMaster = defaultPse == null ? selectedMaster : null;
+  if (actualMaster != null) onSelect?.call(master, actualMaster);
   final dir = defaultPse != null
       ? null
       : await probe(
@@ -499,10 +538,19 @@ Future<CpuDirectoryScan> discoverCpuDirectory(CpuCardAccess card) async {
   }
 
   if (dir != null) {
-    tree.add(
-      CpuDirectoryEntry(master.child(0x2F00), kind: dir.kind, label: 'EF.DIR'),
+    final address = master.child(0x2F00);
+    tree.add(CpuDirectoryEntry(address, kind: dir.kind, label: 'EF.DIR'));
+    onSelect?.call(address, dir);
+    addApps(
+      await probe(
+        'EF.DIR',
+        () => card.readApplicationEntries(
+          dir,
+          onRead: (reply, index, record) =>
+              onRead?.call(address, reply, index, record),
+        ),
+      ),
     );
-    addApps(await probe('EF.DIR', () => card.readApplicationEntries(dir)));
   }
   var remaining = 80;
   final boundedCard = CpuCardAccess((command) {
@@ -538,6 +586,8 @@ Future<CpuDirectoryScan> discoverCpuDirectory(CpuCardAccess card) async {
       address,
       file,
       records: name == cpuPseName,
+      onRead: onRead,
+      onSelect: onSelect,
     );
     incomplete |= stopped;
   }
@@ -556,31 +606,45 @@ Future<CpuDirectoryScan> discoverCpuDirectory(CpuCardAccess card) async {
     tree.add(
       CpuDirectoryEntry(app, kind: CpuLiveFileKind.directory, label: 'NDEF'),
     );
+    onSelect?.call(app, ndef);
     final cc = await probe(
       'NDEF CC',
       () => card.selectType4File(cpuType4CcFid),
     );
     if (cc != null) {
+      final address = app.child(cpuType4CcFid);
       tree.add(
-        CpuDirectoryEntry(
-          app.child(cpuType4CcFid),
-          kind: cc.kind,
-          label: 'CC',
-          type4: true,
-        ),
+        CpuDirectoryEntry(address, kind: cc.kind, label: 'CC', type4: true),
       );
-      final files = await probe('NDEF CC', () => _readType4Files(card));
-      for (final file in files ?? const <(int, int, bool)>[]) {
-        final (fid, capacity, ndef) = file;
+      onSelect?.call(address, cc);
+      final capability = await probe('NDEF CC', () async {
+        final reply = await readCpuType4Capability(card);
+        onRead?.call(address, reply, 0, false);
+        return parseCpuType4Capability(reply.data);
+      });
+      if (capability != null) {
         tree.add(
           CpuDirectoryEntry(
-            app.child(fid),
-            kind: CpuLiveFileKind.binary,
-            capacity: capacity,
-            label: ndef ? 'NDEF' : '',
+            address,
+            kind: cc.kind,
+            capacity: capability.header.size,
             type4: true,
+            type4Header: capability.header,
           ),
         );
+        for (final file in capability.files.take(32)) {
+          tree.add(
+            CpuDirectoryEntry(
+              app.child(file.fid),
+              kind: CpuLiveFileKind.binary,
+              capacity: file.capacity,
+              label: file.lengthBytes == null ? '' : 'NDEF',
+              type4: true,
+              type4Header: capability.header,
+              type4File: file,
+            ),
+          );
+        }
       }
     }
   }
@@ -607,49 +671,3 @@ Future<CpuDirectoryScan> discoverCpuDirectory(CpuCardAccess card) async {
 
 Uint8List? _field(Uint8List? data, int tag) =>
     data == null ? null : cpuFindTlv(data, tag, recursive: false).firstOrNull;
-
-Future<List<(int, int, bool)>> _readType4Files(CpuCardAccess card) async {
-  final header = (await card.readBinary(0, 15)).data;
-  if (header.length != 15)
-    throw const FormatException('Incomplete Type 4 CC header');
-  final size = header[0] << 8 | header[1], maxRead = header[3] << 8 | header[4];
-  if (size < 15 || size > 1024 || maxRead < 15)
-    throw const FormatException('Invalid Type 4 CC length');
-  final blocks = BytesBuilder()..add(header.sublist(7));
-  for (var offset = header.length; offset < size;) {
-    final length = math.min(256, math.min(size - offset, maxRead));
-    final block = (await card.readBinary(offset, length)).data;
-    if (block.length != length)
-      throw const FormatException('Incomplete Type 4 CC');
-    blocks.add(block);
-    offset += length;
-  }
-  final data = blocks.takeBytes();
-  final files = <(int, int, bool)>[];
-  final ids = <int>{cpuType4CcFid, 0, 0x3F00, 0x3FFF, 0xFFFF};
-  for (var i = 0; i < data.length && files.length < 32;) {
-    final tag = data[i++];
-    if (tag == 0) continue;
-    if (tag == 0xFE) break;
-    if (i >= data.length) throw const FormatException('Incomplete Type 4 TLV');
-    var length = data[i++];
-    if (length == 0xFF) {
-      if (i + 2 > data.length)
-        throw const FormatException('Incomplete Type 4 TLV length');
-      length = data[i] << 8 | data[i + 1];
-      i += 2;
-    }
-    if (i + length > data.length)
-      throw const FormatException('Incomplete Type 4 file descriptor');
-    if ((tag == 4 || tag == 5) && length == 6 || tag == 6 && length == 8) {
-      final fid = data[i] << 8 | data[i + 1];
-      var capacity = 0;
-      for (var index = i + 2; index < i + length - 2; index++) {
-        capacity = capacity << 8 | data[index];
-      }
-      if (capacity > 0 && ids.add(fid)) files.add((fid, capacity, tag != 5));
-    }
-    i += length;
-  }
-  return files;
-}

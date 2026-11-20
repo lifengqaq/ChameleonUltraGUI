@@ -27,6 +27,7 @@ jobs:
           lib/gui/menu/tools/cpu_card_manager.dart lib/gui/menu/tools/cpu_profiles.dart lib/helpers/cpu_card_access.dart test/cpu_card_access_test.dart
           lib/helpers/cpu_directory.dart lib/gui/menu/tools/cpu_directory_view.dart
           lib/helpers/cpu_directory_record.dart test/cpu_card_explorer_test.dart
+          lib/helpers/cpu_live_archive.dart lib/helpers/cpu_type4.dart lib/helpers/cpu_transit_info.dart lib/gui/menu/pages/cpu_archive_view.dart
           lib/gui/menu/dialogs/card/cpu_change_pin.dart
           test/cpu_emv_test.dart test/cpu_page_storage_test.dart lib/helpers/iso7816_fs.dart
           lib/gui/menu/tools/cpu_filesystem.dart test/iso7816_fs_test.dart test/cpu_slot_transaction_test.dart

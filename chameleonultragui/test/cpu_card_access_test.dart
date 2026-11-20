@@ -5,6 +5,8 @@ import 'package:chameleonultragui/gui/menu/tools/cpu_directory_view.dart';
 import 'package:chameleonultragui/helpers/cpu_card_access.dart';
 import 'package:chameleonultragui/helpers/cpu_auth.dart';
 import 'package:chameleonultragui/helpers/cpu_directory.dart';
+import 'package:chameleonultragui/helpers/cpu_directory_record.dart';
+import 'package:chameleonultragui/helpers/cpu_type4.dart';
 import 'package:chameleonultragui/helpers/iso14443_4.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -25,6 +27,71 @@ class _CardScript {
 }
 
 void main() {
+  test(
+    'binary writes advance by confirmed blocks and report a stopped transfer',
+    () async {
+      final first = List.filled(255, 'AA').join();
+      final tail = List.filled(45, 'BB').join();
+      final script = _CardScript([
+        ('00D60005FF$first', '9000'),
+        ('00D601042D$tail', '6982'),
+        ('00D601042D$tail', '6581'),
+      ]);
+      final card = CpuCardAccess(script.transmit);
+      var requests = 0;
+      await expectLater(
+        card.updateBinaryRange(
+          5,
+          cpuHex('$first$tail', max: 300),
+          write: (offset, data) => runCpuFileOperation(
+            () => card.updateBinary(offset, data),
+            authorize: () async {
+              requests++;
+              return true;
+            },
+          ),
+        ),
+        throwsA(
+          isA<CpuPartialWrite>()
+              .having((failure) => failure.confirmedBytes, 'confirmed', 255)
+              .having(
+                (failure) => (failure.cause as CpuFileStatus).word,
+                'status',
+                0x6581,
+              ),
+        ),
+      );
+      expect(requests, 1);
+      script.done();
+    },
+  );
+
+  test('decodes ISO directory paths and Type 4 CC and NDEF without guessing by bytes', () {
+    final dir = inspectCpuDirectoryRecord(
+      cpuHex('610F4F05F01020304051063F0050151001'),
+      format: CpuDirectoryFormat.efDir,
+    );
+    expect(dir.issues, isEmpty);
+    expect(dir.fields.last.value, cpuHex('3F0050151001'));
+    final cc = parseCpuType4Capability(
+      cpuHex('001930003B00340406E111040000FF0608E1120001020300FF'),
+    );
+    expect(cc.header.maxRead, 0x3B);
+    expect(cc.files.first.writeAccess, 255);
+    expect(cc.files.last.lengthBytes, 4);
+    final message = cpuHex(
+      '9101055402656E486951010C55046578616D706C652E636F6D',
+    );
+    final records = parseCpuNdefMessage(message);
+    expect(records.first.text, 'Hi');
+    expect(records.first.language, 'en');
+    expect(records.last.uri, 'https://example.com');
+    expect(
+      () => parseCpuNdefMessage(message.sublist(0, message.length - 1)),
+      throwsFormatException,
+    );
+  });
+
   test('explicit AID selection can omit Le but never changes the name or bypasses a security status', () async {
     final script = _CardScript([
       ('00A4040009A0000000038698079100', '6A82'),

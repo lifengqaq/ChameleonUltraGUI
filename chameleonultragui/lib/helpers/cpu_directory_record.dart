@@ -22,9 +22,14 @@ typedef CpuDirectoryInspection = ({
   List<CpuDirectoryIssue> issues,
 });
 
-/// Inspect PSE directory records without trying to repair card data. Keep
+enum CpuDirectoryFormat { pseRecord, ppseInline, efDir }
+
+/// Inspect a declared directory without trying to repair card data. Keep
 /// valid fields before a bad TLV so the AID and the original bytes stay visible.
-CpuDirectoryInspection inspectCpuDirectoryRecord(Uint8List bytes) {
+CpuDirectoryInspection inspectCpuDirectoryRecord(
+  Uint8List bytes, {
+  CpuDirectoryFormat format = CpuDirectoryFormat.pseRecord,
+}) {
   final fields = <CpuDirectoryField>[], issues = <CpuDirectoryIssue>[];
   void issue(
     CpuDirectoryIssueKind kind,
@@ -105,13 +110,18 @@ CpuDirectoryInspection inspectCpuDirectoryRecord(Uint8List bytes) {
   }
 
   var hasTemplate = false;
-  for (final outer in elements(0, bytes.length)) {
-    if (outer.tag != 0x70) continue;
-    for (final app in elements(outer.start, outer.end)) {
+  void inspectApplications(Iterable<({int tag, int start, int end})> apps) {
+    for (final app in apps) {
       if (app.tag != 0x61) continue;
       hasTemplate = true;
       for (final field in elements(app.start, app.end)) {
-        if (const [0x4F, 0x50, 0x9D].contains(field.tag)) {
+        final extra = format == CpuDirectoryFormat.efDir ? 0x51 : 0x87;
+        if ([
+          0x4F,
+          0x50,
+          extra,
+          if (format != CpuDirectoryFormat.efDir) 0x9D,
+        ].contains(field.tag)) {
           fields.add((
             tag: field.tag,
             value: bytes.sublist(field.start, field.end),
@@ -119,6 +129,15 @@ CpuDirectoryInspection inspectCpuDirectoryRecord(Uint8List bytes) {
         }
       }
     }
+  }
+
+  if (format == CpuDirectoryFormat.pseRecord) {
+    for (final outer in elements(0, bytes.length)) {
+      if (outer.tag == 0x70)
+        inspectApplications(elements(outer.start, outer.end));
+    }
+  } else {
+    inspectApplications(elements(0, bytes.length));
   }
   if (!hasTemplate && issues.isEmpty) issue(CpuDirectoryIssueKind.structure, 0);
   return (fields: fields, issues: issues);

@@ -4,6 +4,7 @@ import 'package:chameleonultragui/bridge/chameleon.dart';
 import 'package:chameleonultragui/connector/serial_abstract.dart';
 import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
 import 'package:chameleonultragui/gui/menu/tools/cpu_card_manager.dart';
+import 'package:chameleonultragui/helpers/cpu_live_archive.dart';
 import 'package:chameleonultragui/helpers/definitions.dart';
 import 'package:chameleonultragui/helpers/general.dart' show bytesToHexSpace;
 import 'package:chameleonultragui/helpers/iso14443_4.dart';
@@ -15,6 +16,7 @@ import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:logger/logger.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class _Connection extends AbstractSerial {
   _Connection() : super(log: Logger()) {
@@ -107,7 +109,7 @@ Future<AppLocalizations> _openExplorer(WidgetTester tester, _Card card) async {
 
 void main() {
   testWidgets(
-    'selecting the City Union AID displays the balance read from the card, including zero',
+    'queries City Union balance separately and displays a real zero',
     (tester) async {
       final card = _Card([
         ..._Card._pseScan,
@@ -116,6 +118,10 @@ void main() {
         ('805C000204', '000030399000'),
         ('805C000204', '6A81'),
         ('805C000204', '0000009000'),
+        (
+          '00B0950000',
+          '0000200000000000000100000000000000000000202411202034112000009000',
+        ),
         ('00A4040009A0000000038698079100', '6F0B8409A000000003869807919000'),
       ]);
       final l = await _openExplorer(tester, card);
@@ -126,9 +132,13 @@ void main() {
       await tester.enterText(find.byType(TextFormField), 'A00000000386980701');
       await tester.tap(find.widgetWithText(FilledButton, l.ok));
       await tester.pumpAndSettle();
+      expect(card.exchanges, _Card._pseScan.length + 1);
+      expect(find.text(l.cpu_manage_purse_amount('0.00')), findsNothing);
+      final refresh = find.byTooltip(l.cpu_manage_purse_refresh);
+      await tester.tap(refresh);
+      await tester.pumpAndSettle();
       expect(find.text(l.cpu_manage_purse_amount('0.00')), findsOneWidget);
 
-      final refresh = find.byTooltip(l.cpu_manage_purse_refresh);
       await tester.tap(refresh);
       await tester.pumpAndSettle();
       expect(find.text(l.cpu_manage_purse_amount('123.45')), findsOneWidget);
@@ -143,10 +153,52 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text(l.cpu_manage_purse_bad_response), findsOneWidget);
 
+      await tester.tap(find.text(l.cpu_transit_read_info));
+      await tester.pumpAndSettle();
+      expect(find.text(l.cpu_transit_info), findsOneWidget);
+      expect(find.text('2024-11-20'), findsOneWidget);
+      expect(find.text('2034-11-20'), findsOneWidget);
+
       await tester.tap(find.text('AID A00000000386980791'));
       await tester.pumpAndSettle();
       expect(find.text(l.cpu_manage_purse_balance), findsNothing);
       expect(card.exchanges, card.script.length);
+    },
+  );
+
+  testWidgets(
+    'saves the discovered directory and raw records after RF is closed',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = SharedPreferencesProvider();
+      await prefs.load();
+      final card = _Card(_Card._pseScan);
+      final l = await _openExplorer(tester, card);
+      await tester.tap(find.text(l.cpu_disconnect));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(l.cpu_archive_save));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(l.cpu_archive_to_library));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, l.save));
+      await tester.pumpAndSettle();
+
+      final stored = prefs.getCards().single;
+      expect(stored.data, isEmpty);
+      final archive = stored.extraData.cpuDump;
+      expect(archive['format'], cpuLiveArchiveFormat);
+      expect(archive['archiveOnly'], isTrue);
+      expect(archive['universalComplete'], isFalse);
+      final entries = (archive['entries'] as List).cast<Map>();
+      final catalog = entries.singleWhere((entry) => entry['sfi'] == 1);
+      expect(catalog['readRanges'], [
+        {'record': 1, 'status': '9000', 'data': _directoryRecord},
+      ]);
+      final app = entries.singleWhere(
+        (entry) => entry['aid'] == 'A00000000386980791',
+      );
+      expect(app['readRanges'], isEmpty);
+      expect(card.exchanges, _Card._pseScan.length);
     },
   );
 

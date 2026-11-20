@@ -4,7 +4,10 @@ import 'package:chameleonultragui/helpers/cpu_security.dart';
 import 'dart:typed_data';
 
 import 'package:chameleonultragui/generated/i18n/app_localizations.dart';
+import 'package:chameleonultragui/gui/menu/pages/cpu_archive_view.dart';
 import 'package:chameleonultragui/gui/menu/tools/cpu_filesystem.dart';
+import 'package:chameleonultragui/helpers/cpu_live_archive.dart';
+import 'package:chameleonultragui/helpers/general.dart';
 import 'package:chameleonultragui/helpers/iso14443_4.dart';
 import 'package:chameleonultragui/helpers/iso7816_fs.dart';
 import 'package:chameleonultragui/sharedprefsprovider.dart';
@@ -91,10 +94,27 @@ class _CpuDataEditorState extends State<CpuDataEditor> {
   @override
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
+    final archive = widget.card.extraData.cpuDump;
+    final isLiveArchive = archive['format'] == cpuLiveArchiveFormat;
     return Scaffold(
       appBar: AppBar(
         title: Text(l.cpu_data_title),
-        actions: [TextButton(onPressed: _save, child: Text(l.save))],
+        actions: [
+          if (isLiveArchive)
+            IconButton(
+              tooltip: l.cpu_archive_export_json,
+              icon: const Icon(Icons.save_alt),
+              onPressed: () async {
+                try {
+                  await saveTag(widget.card, context, false);
+                } catch (_) {
+                  if (context.mounted)
+                    setState(() => _error = l.cpu_manage_unexpected_file);
+                }
+              },
+            ),
+          TextButton(onPressed: _save, child: Text(l.save)),
+        ],
       ),
       body: ListView(
         key: const PageStorageKey('cpu-native-data-scroll'),
@@ -113,6 +133,7 @@ class _CpuDataEditorState extends State<CpuDataEditor> {
             if (widget.card.extraData.cpuDump['archiveOnly'] == true)
               Text(l.cpu_dump_archive_only),
           ],
+          if (isLiveArchive) CpuLiveArchiveView(archive: archive),
           if (_filesystem != null)
             Wrap(
               spacing: 8,
