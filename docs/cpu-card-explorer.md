@@ -15,7 +15,9 @@
 
 FMCOS 2.0 的主文件默认为 `3F00`，名称可以是 `1PAY.SYS.DDF01`。手册 §7.4 的实际例子返回 `6F 15 … A5 03 88 01 01`，没有 FID 标签。打开主文件时如果收到和这个例子完全一致的 FCI，右侧会给出 **按 FMCOS 打开 3F00**。此按钮用手册中的不带 Le 的 SELECT 重新选主文件；成功并得到同一 FCI 后才对本次会话启用兼容模式。FID 或名称本身不能鉴定具体芯片。
 
-随后点 **新建目录**，按 FMCOS 2.0 §7.13 的子 DF 模板确认目标 FID、目录名、空间和访问属性。默认值是可改的测试示例；应用文件 ID `95` 取自手册的 `0015` 示例，会话不会为它创建 EF 或登记 PSE 记录。这里只创建现有主文件下的子 DF；不发建主文件、擦除或密钥命令，也不在卡片拒绝后自动改用其他写入格式。实现参考：[复旦微 FMCOS 2.0 用户手册 §7.4、§7.13](https://www.fongwah.com/uploads/files/%E6%96%B0%E7%89%88FMCOS2.0%E7%94%A8%E6%88%B7%E6%89%8B%E5%86%8C.pdf)、[Proxmark3 的 FMCOS 实现](https://github.com/RfidResearchGroup/proxmark3/blob/master/client/src/cmdhffmcos.c)。
+随后点 **新建目录**，按 FMCOS 2.0 §7.13 的子 DF 模板确认目标 FID、目录名、空间和访问属性。默认值是可改的测试示例；应用文件 ID `95` 取自手册的 `0015` 示例，会话不会为它创建 EF 或登记 PSE 记录。这里只创建现有主文件下的子 DF，不会重建主文件、擦除或增改密钥。
+
+父目录拒绝创建并返回 `6982` 时，可用已知的管理 PIN 或 DES／3DES 外部认证密钥。FMCOS 2.0 §7.1–7.2 支持 4 字节挑战在末尾补零和 8 字节挑战直接加密；§7.10 的明文 PIN 输入按 2–6 字节原始数据发送。认证在原射频会话和父目录中进行，成功后重试一次原命令。没有默认凭据；表单内的建立权限用于新目录内的操作，不能代替父目录的权限。实现参考：[复旦微 FMCOS 2.0 用户手册](https://www.fongwah.com/uploads/files/%E6%96%B0%E7%89%88FMCOS2.0%E7%94%A8%E6%88%B7%E6%89%8B%E5%86%8C.pdf)、[Proxmark3 的 FMCOS 实现](https://github.com/RfidResearchGroup/proxmark3/blob/master/client/src/cmdhffmcos.c)。
 
 ## 解析覆盖
 

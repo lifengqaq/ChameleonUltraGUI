@@ -180,7 +180,7 @@ void main() {
   });
 
   testWidgets(
-    'opts into the documented FMCOS root then creates one confirmed DF',
+    'authenticates in the same FMCOS MF only after the confirmed create is rejected',
     (tester) async {
       final card = _Card([
         ..._Card._emptyPseScan,
@@ -189,6 +189,9 @@ void main() {
         ('00A40004023F00', '6A86'),
         ('00A4000000', _directoryFci),
         ('00A40000023F00', _directoryFci),
+        ('80E011000D380200F0F195FFFF5445535431', '6982'),
+        ('0084000004', 'BB83BFF39000'),
+        ('008200010874B0047DD681D96C', '9000'),
         ('80E011000D380200F0F195FFFF5445535431', '9000'),
         ('00A40000023F00', _directoryFci),
         ('00A40000021100', '6F0984055445535431A5009000'),
@@ -219,6 +222,17 @@ void main() {
       await tester.pumpAndSettle();
       expect(card.exchanges, afterSelect);
       await tester.tap(ok);
+      await tester.pumpAndSettle();
+      expect(find.text(l.cpu_auth_fmcos_help), findsOneWidget);
+      expect(card.exchanges, afterSelect + 1);
+      final id = find.byKey(const PageStorageKey('cpu-auth-reference'));
+      final key = find.byKey(const PageStorageKey('cpu-auth-credential'));
+      expect(tester.widget<TextField>(id).controller!.text, isEmpty);
+      expect(tester.widget<TextField>(key).controller!.text, isEmpty);
+      await tester.enterText(id, '01');
+      // Public test vector from the FMCOS 2.0 manual, not a card credential.
+      await tester.enterText(key, '0102030405060708');
+      await tester.tap(find.byKey(const ValueKey('cpu-auth-submit')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('FID 1100'));
       await tester.pumpAndSettle();

@@ -47,18 +47,22 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
   late CpuAuthMethod _method;
   late CpuPinEncoding _encoding;
   late CpuSm4Challenge _sm4Challenge;
+  late CpuFmcosChallenge _fmcosChallenge;
   late final TextEditingController _credential, _reference, _algorithm;
   bool _busy = false, _sending = false, _transportFailed = false;
   CpuAuthResult? _result;
   String? _error;
+  bool get _fmcos => widget.initial.isFmcos;
   CpuAuthSettings get _settings => CpuAuthSettings(
     method: _method,
     pinEncoding: _encoding,
     sm4Challenge: _sm4Challenge,
+    profile: widget.initial.profile,
+    fmcosChallenge: _fmcosChallenge,
     reference: int.tryParse(_reference.text, radix: 16) ?? 0,
     algorithm: int.tryParse(_algorithm.text, radix: 16) ?? 0,
   );
-  String _suggestedCredential() => !widget.prefillCredential
+  String _suggestedCredential() => !widget.prefillCredential || _fmcos
       ? ''
       : switch (_method) {
           CpuAuthMethod.pin => '000000',
@@ -72,6 +76,7 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
     _method = widget.initial.method;
     _encoding = widget.initial.pinEncoding;
     _sm4Challenge = widget.initial.sm4Challenge;
+    _fmcosChallenge = widget.initial.fmcosChallenge;
     _credential = TextEditingController(text: _suggestedCredential());
     _reference = TextEditingController(
       text: widget.operation == null
@@ -112,14 +117,15 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
           !RegExp(r'^[0-9a-fA-F]{1,2}$').hasMatch(_algorithm.text)) {
         throw const FormatException('Invalid reference');
       }
-      if (_method == CpuAuthMethod.pin) {
-        cpuVerifyData(_credential.text, _encoding);
-      } else {
-        cpuAuthKey(_credential.text, _method);
-      }
+      final bytes = _method == CpuAuthMethod.pin
+          ? cpuAuthPinData(settings, _credential.text)
+          : cpuAuthKey(_credential.text, _method, fmcos: _fmcos);
+      bytes.fillRange(0, bytes.length, 0);
     } on FormatException {
       setState(
-        () => _error = _method == CpuAuthMethod.sm4
+        () => _error = _fmcos
+            ? l.cpu_auth_fmcos_invalid
+            : _method == CpuAuthMethod.sm4
             ? l.cpu_auth_sm4_invalid
             : l.cpu_auth_invalid,
       );
@@ -210,7 +216,9 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
                   const SizedBox(height: 8),
                 ],
                 Text(
-                  widget.prefillCredential
+                  _fmcos
+                      ? l.cpu_auth_fmcos_help
+                      : widget.prefillCredential
                       ? l.cpu_auth_help
                       : l.cpu_manage_auth_help,
                 ),
@@ -231,10 +239,11 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
                       value: CpuAuthMethod.tdes,
                       child: Text(l.cpu_auth_tdes),
                     ),
-                    DropdownMenuItem(
-                      value: CpuAuthMethod.sm4,
-                      child: Text(l.cpu_auth_sm4),
-                    ),
+                    if (!_fmcos)
+                      DropdownMenuItem(
+                        value: CpuAuthMethod.sm4,
+                        child: Text(l.cpu_auth_sm4),
+                      ),
                   ],
                   onChanged: _busy
                       ? null
@@ -243,12 +252,14 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
                           setState(() {
                             _method = value;
                             _credential.text = _suggestedCredential();
-                            _result = widget.history.forSettings(_settings);
+                            _result = _reference.text.isEmpty
+                                ? null
+                                : widget.history.forSettings(_settings);
                             _error = null;
                           });
                         },
                 ),
-                if (_method == CpuAuthMethod.pin)
+                if (_method == CpuAuthMethod.pin && !_fmcos)
                   DropdownButtonFormField<CpuPinEncoding>(
                     isExpanded: true,
                     value: _encoding,
@@ -291,6 +302,33 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
                   ),
                   Text(l.cpu_auth_sm4_help),
                 ],
+                if (_fmcos && _method != CpuAuthMethod.pin)
+                  DropdownButtonFormField<CpuFmcosChallenge>(
+                    isExpanded: true,
+                    initialValue: _fmcosChallenge,
+                    decoration: InputDecoration(
+                      labelText: l.cpu_auth_fmcos_challenge,
+                    ),
+                    items: [
+                      DropdownMenuItem(
+                        value: CpuFmcosChallenge.padded4,
+                        child: Text(l.cpu_auth_fmcos_challenge_four),
+                      ),
+                      DropdownMenuItem(
+                        value: CpuFmcosChallenge.raw8,
+                        child: Text(l.cpu_auth_fmcos_challenge_eight),
+                      ),
+                    ],
+                    onChanged: _busy
+                        ? null
+                        : (value) {
+                            if (value != null)
+                              setState(() {
+                                _fmcosChallenge = value;
+                                _error = null;
+                              });
+                          },
+                  ),
                 TextField(
                   key: const PageStorageKey('cpu-auth-reference'),
                   controller: _reference,
@@ -298,7 +336,7 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
                   onChanged: (_) => _changedReference(),
                   decoration: InputDecoration(labelText: l.cpu_auth_reference),
                 ),
-                if (_method != CpuAuthMethod.pin)
+                if (_method != CpuAuthMethod.pin && !_fmcos)
                   TextField(
                     key: const PageStorageKey('cpu-auth-algorithm'),
                     controller: _algorithm,
@@ -316,7 +354,8 @@ class _CpuAuthenticationDialogState extends State<CpuAuthenticationDialog> {
                   autocorrect: false,
                   decoration: InputDecoration(
                     labelText: switch (_method) {
-                      CpuAuthMethod.pin => 'PIN',
+                      CpuAuthMethod.pin =>
+                        _fmcos ? l.cpu_auth_fmcos_pin : 'PIN',
                       CpuAuthMethod.sm4 => l.cpu_auth_sm4_key,
                       _ => l.cpu_auth_key,
                     },

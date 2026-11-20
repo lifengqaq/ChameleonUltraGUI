@@ -122,6 +122,22 @@ void main() {
     expect(result.success, isTrue);
   });
   test(
+    'FMCOS VERIFY sends the provisioned short PIN bytes and the supplied ID',
+    () async {
+      final commands = <Uint8List>[];
+      final result = await authenticateCpuCard(
+        const CpuAuthSettings(profile: CpuAuthProfile.fmcos20, reference: 0x2A),
+        '12 34 5F',
+        (command) async {
+          commands.add(command);
+          return cpuHex('9000');
+        },
+      );
+      expect(commands, [cpuHex('0020002A0312345F')]);
+      expect(result.success, isTrue);
+    },
+  );
+  test(
     'SM4 builds one 16-byte authentication proof for each challenge format',
     () async {
       const key = '0123456789ABCDEFFEDCBA9876543210';

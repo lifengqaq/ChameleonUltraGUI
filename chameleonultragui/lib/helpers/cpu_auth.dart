@@ -8,20 +8,35 @@ enum CpuAuthMethod { pin, des, tdes, sm4 }
 
 enum CpuPinEncoding { ascii, bcd, iso9564 }
 
+enum CpuAuthProfile { generic, fmcos20 }
+
+enum CpuFmcosChallenge {
+  padded4(4),
+  raw8(8);
+
+  const CpuFmcosChallenge(this.length);
+  final int length;
+}
+
 class CpuAuthSettings {
   final CpuAuthMethod method;
   final CpuPinEncoding pinEncoding;
   final CpuSm4Challenge sm4Challenge;
+  final CpuAuthProfile profile;
+  final CpuFmcosChallenge fmcosChallenge;
   final int reference, algorithm;
   const CpuAuthSettings({
     this.method = CpuAuthMethod.pin,
     this.pinEncoding = CpuPinEncoding.ascii,
     this.sm4Challenge = CpuSm4Challenge.padded8,
+    this.profile = CpuAuthProfile.generic,
+    this.fmcosChallenge = CpuFmcosChallenge.padded4,
     this.reference = 0,
     this.algorithm = 0,
   });
   String get counterId =>
       '${method == CpuAuthMethod.pin ? 'pin' : 'key'}:$reference';
+  bool get isFmcos => profile == CpuAuthProfile.fmcos20;
 }
 
 class CpuAuthResult {
@@ -46,9 +61,14 @@ class CpuAuthHistory {
 
   // For ISO reference bytes, b8 distinguishes the current DF from the global
   // reference. Keep the same retry history across files in a directory.
-  String _id(CpuAuthSettings settings) => settings.reference & 0x80 == 0
-      ? settings.counterId
-      : '$_scope/${settings.counterId}';
+  String _id(CpuAuthSettings settings) {
+    // FMCOS uses the full reference byte as an ID in the current directory.
+    if (settings.isFmcos) return 'fmcos:$_scope/${settings.counterId}';
+    return settings.reference & 0x80 == 0
+        ? settings.counterId
+        : '$_scope/${settings.counterId}';
+  }
+
   CpuAuthResult? forSettings(CpuAuthSettings settings) =>
       _results[_id(settings)];
   void record(CpuAuthSettings settings, CpuAuthResult result) {
@@ -75,25 +95,39 @@ Uint8List cpuVerifyData(String pin, CpuPinEncoding encoding) {
   ]);
 }
 
-Uint8List cpuAuthKey(String value, CpuAuthMethod method) {
+/// FMCOS 2.0 §7.10 takes the provisioned PIN bytes, without ISO PIN-block padding.
+Uint8List cpuAuthPinData(CpuAuthSettings settings, String pin) {
+  if (!settings.isFmcos) return cpuVerifyData(pin, settings.pinEncoding);
+  final text = pin.replaceAll(RegExp(r'\s'), '');
+  if (!RegExp(r'^(?:[0-9a-fA-F]{2}){2,6}$').hasMatch(text)) {
+    throw const FormatException('FMCOS PIN must contain 2–6 hexadecimal bytes');
+  }
+  return _hexBytes(text);
+}
+
+Uint8List cpuAuthKey(String value, CpuAuthMethod method, {bool fmcos = false}) {
   final text = value.replaceAll(RegExp(r'\s'), '');
   final lengths = switch (method) {
     CpuAuthMethod.des => const [16],
-    CpuAuthMethod.tdes => const [32, 48],
-    CpuAuthMethod.sm4 => const [32],
+    CpuAuthMethod.tdes => fmcos ? const [32] : const [32, 48],
+    CpuAuthMethod.sm4 => fmcos ? const <int>[] : const [32],
     CpuAuthMethod.pin => const <int>[],
   };
   if (!lengths.contains(text.length) ||
       !RegExp(r'^[a-fA-F0-9]+$').hasMatch(text)) {
-    throw const FormatException(
-      'DES requires 8 bytes; 3DES 16 or 24; SM4 exactly 16',
+    throw FormatException(
+      fmcos
+          ? 'FMCOS DES requires 8 bytes and 3DES 16'
+          : 'DES requires 8 bytes; 3DES 16 or 24; SM4 exactly 16',
     );
   }
-  return Uint8List.fromList([
-    for (var i = 0; i < text.length; i += 2)
-      int.parse(text.substring(i, i + 2), radix: 16),
-  ]);
+  return _hexBytes(text);
 }
+
+Uint8List _hexBytes(String text) => Uint8List.fromList([
+  for (var i = 0; i < text.length; i += 2)
+    int.parse(text.substring(i, i + 2), radix: 16),
+]);
 
 Uint8List cpuEncryptChallenge(Uint8List key, Uint8List challenge) {
   if (challenge.length != 8 || ![8, 16, 24].contains(key.length)) {
@@ -132,8 +166,11 @@ Future<CpuAuthResult> authenticateCpuCard(
 ) async {
   RangeError.checkValueInInterval(settings.reference, 0, 255);
   RangeError.checkValueInInterval(settings.algorithm, 0, 255);
+  if (settings.isFmcos && settings.algorithm != 0) {
+    throw const FormatException('FMCOS EXTERNAL AUTHENTICATE uses P1 00');
+  }
   if (settings.method == CpuAuthMethod.pin) {
-    final data = cpuVerifyData(credential, settings.pinEncoding);
+    final data = cpuAuthPinData(settings, credential);
     try {
       return CpuAuthResult(
         cpuAuthStatus(
@@ -153,9 +190,13 @@ Future<CpuAuthResult> authenticateCpuCard(
       data.fillRange(0, data.length, 0);
     }
   }
-  final key = cpuAuthKey(credential, settings.method);
+  final key = cpuAuthKey(credential, settings.method, fmcos: settings.isFmcos);
   final isSm4 = settings.method == CpuAuthMethod.sm4;
-  final length = isSm4 ? settings.sm4Challenge.length : 8;
+  final length = isSm4
+      ? settings.sm4Challenge.length
+      : settings.isFmcos
+      ? settings.fmcosChallenge.length
+      : 8;
   try {
     final challenge = await exchange(
       Uint8List.fromList([0, 0x84, 0, 0, length]),
@@ -165,7 +206,8 @@ Future<CpuAuthResult> authenticateCpuCard(
     if (challenge.length != length + 2) {
       throw FormatException('Expected a $length-byte challenge from the card');
     }
-    final block = Uint8List(isSm4 ? sm4BlockSize : length)
+    // FMCOS 2.0 §7.1–7.2: the four-byte challenge is right-padded with zeros.
+    final block = Uint8List(isSm4 ? sm4BlockSize : 8)
       ..setRange(0, length, challenge);
     if (isSm4 && length == 8) block[length] = 0x80;
     final answer = isSm4

@@ -308,6 +308,12 @@ class _CpuCardManagerState extends State<CpuCardManager> {
           context,
           exchange: card.exchange,
           history: history,
+          initial: _fmcosMode
+              ? const CpuAuthSettings(
+                  profile: CpuAuthProfile.fmcos20,
+                  method: CpuAuthMethod.des,
+                )
+              : const CpuAuthSettings(),
           prefillCredential: false,
           operation: '$operation\n$scope\n${_status(0x6982)}',
         );
@@ -1107,7 +1113,6 @@ class _CpuCardManagerState extends State<CpuCardManager> {
         eraseAccess: permissions[1],
         applicationFileId: permissions[2],
       ),
-      allowAuthentication: false,
       directoryChange: true,
       rejectionNote: (word) => word == 0x6A86 ? l.cpu_manage_file_exists : null,
       onSuccess: () => _tree.add(
