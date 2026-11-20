@@ -201,7 +201,12 @@ String cpuProfileJson(
     throw const FormatException('文件系统与静态响应表需选择一种模拟模式');
   return const JsonEncoder.withIndent('  ').convert({
     'format': 'chameleon-iso14443-4',
-    'version': filesystem == null ? 1 : 2,
+    'version':
+        filesystem != null && filesystem.imageVersion == cpuFilesystemSm4Version
+        ? 3
+        : filesystem == null
+        ? 1
+        : 2,
     'name': name,
     'uid': bytesToHex(identity.uid),
     'atqa': bytesToHex(identity.atqa),
@@ -222,7 +227,7 @@ String cpuProfileJson(
 CardSave cpuProfileFromJson(String source) {
   final data = jsonDecode(source) as Map<String, dynamic>;
   if (data['format'] != 'chameleon-iso14443-4' ||
-      ![1, 2].contains(data['version'])) {
+      ![1, 2, 3].contains(data['version'])) {
     throw const FormatException('Unsupported CPU card profile');
   }
   final uid = cpuHex(data['uid'] as String, min: 4, max: 10);
@@ -240,13 +245,18 @@ CardSave cpuProfileFromJson(String source) {
     ]),
   );
   final fsValue = data['filesystem'];
-  if ((data['version'] == 2) != (fsValue is Map<String, dynamic>) ||
-      (fsValue != null && data['responses'] != null)) {
-    throw const FormatException('文件系统配置使用 version 2，且与 responses 互斥');
+  if (data['version'] == 1
+      ? fsValue != null
+      : fsValue is! Map<String, dynamic> || data['responses'] != null) {
+    throw const FormatException('文件系统配置使用 version 2 或 3，且与 responses 互斥');
   }
   final filesystem = fsValue == null
       ? null
       : CpuFileSystem.fromJson(fsValue as Map<String, dynamic>);
+  if ((data['version'] == 3) !=
+      (filesystem?.imageVersion == cpuFilesystemSm4Version)) {
+    throw const FormatException('SM4 文件系统配置使用 version 3');
+  }
   final rawResponses = data['responses'] ?? <dynamic>[];
   if (rawResponses is! List) throw const FormatException('responses 需要数组');
   final pairs = [

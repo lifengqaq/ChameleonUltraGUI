@@ -197,6 +197,7 @@ class PluginApi {
     final type = isEM410X(card.tag) && card.tag != TagType.em410XElectra
         ? TagType.em410X
         : card.tag;
+    if (card.tag == TagType.hf14a4) await preflightHf14a4Slot(device, card);
     await device.setReaderDeviceMode(false);
     await device.enableSlot(slot, frequency, true);
     await device.activateSlot(slot);

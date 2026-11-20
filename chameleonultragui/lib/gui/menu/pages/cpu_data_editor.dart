@@ -133,13 +133,16 @@ class _CpuDataEditorState extends State<CpuDataEditor> {
                       final newPin = security.pin.isNotEmpty;
                       final changesMethod =
                           previous.security != null &&
-                          (oldPin != newPin || oldKey != !newPin);
+                          (oldPin != newPin ||
+                              oldKey != !newPin ||
+                              previous.security!.sm4Challenge !=
+                                  security.sm4Challenge);
                       if (changesMethod) {
                         final confirmed = await showDialog<bool>(
                           context: context,
                           builder: (context) => AlertDialog(
                             title: Text(l.cpu_security_title),
-                                content: Text(l.cpu_security_change_method),
+                            content: Text(l.cpu_security_change_method),
                             actions: [
                               TextButton(
                                 onPressed: () => Navigator.pop(context, false),

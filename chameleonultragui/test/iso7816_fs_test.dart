@@ -11,6 +11,7 @@ import 'package:chameleonultragui/helpers/definitions.dart';
 import 'package:chameleonultragui/helpers/cpu_security.dart';
 import 'package:chameleonultragui/helpers/iso14443_4.dart';
 import 'package:chameleonultragui/helpers/iso7816_fs.dart';
+import 'package:chameleonultragui/helpers/sm4.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _Device {
@@ -60,6 +61,56 @@ class _Device {
 }
 
 void main() {
+  test('SM4 images preserve their explicit algorithm and reject legacy firmware before staging', () async {
+    final identity = CardData(
+      uid: cpuHex('04010203040506'),
+      atqa: cpuHex('0004'),
+      sak: 0x20,
+      ats: cpuHex('0208'),
+    );
+    final fs = CpuFileSystem.example().withAuthentication(
+      CpuSecurity(
+        pin: '',
+        key: cpuHex('0123456789ABCDEFFEDCBA9876543210'),
+        keyReference: 0x80,
+        algorithm: 0x09,
+        sm4Challenge: CpuSm4Challenge.padded8,
+      ),
+    );
+    final image = fs.encode();
+    expect(image[4], 3);
+    expect(
+      CpuFileSystem.decode(image).security!.sm4Challenge,
+      CpuSm4Challenge.padded8,
+    );
+    final json = cpuProfileJson(identity, [], filesystem: fs);
+    expect(jsonDecode(json)['version'], 3);
+    expect(cpuProfileFromJson(json).data.single, image);
+    final downgraded = Uint8List.fromList(image)..[4] = 2;
+    expect(() => CpuFileSystem.decode(downgraded), throwsFormatException);
+    final device = _Device();
+    final probes = <int>[];
+    for (final capabilities in [
+      [2, 3],
+      [3, 3],
+      [3, 7],
+    ]) {
+      final upload = writeCpuFilesystem(image, (data) async {
+        if (data.first != 7) return device.exchange(data);
+        probes.add(data.first);
+        return Uint8List.fromList(capabilities);
+      });
+      if (capabilities[1] == 7) {
+        await upload;
+        expect(device.image, image);
+      } else {
+        await expectLater(upload, throwsStateError);
+        expect(device.calls, isEmpty);
+      }
+    }
+    expect(probes, [7, 7, 7]);
+  });
+
   test(
     'CFS1 JSON and binary round trip preserves hierarchy, access and records',
     () {
@@ -174,7 +225,10 @@ void main() {
     expect(decoded.nodes[2].access, 34);
     expect(() => decoded.encode(), throwsFormatException);
     final device = _Device();
-    await expectLater(writeCpuFilesystem(legacy, device.exchange), throwsFormatException);
+    await expectLater(
+      writeCpuFilesystem(legacy, device.exchange),
+      throwsFormatException,
+    );
     expect(device.calls, isEmpty);
 
     final asPin = decoded.withAuthentication(CpuSecurity(pin: '123456'));

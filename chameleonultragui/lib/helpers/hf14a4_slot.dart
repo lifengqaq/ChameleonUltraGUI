@@ -28,7 +28,6 @@ Future<void> writeHf14a4SlotIdentity(
     throw StateError('APDU table upload requires updated ISO-DEP firmware');
   }
   if (image != null) {
-    if (image[4] == 2) await communicator.hf14a4RequireFilesystemSecurity();
     await communicator.hf14a4WriteFilesystem(image);
   } else if (supported) {
     await communicator.hf14a4ClearStaticResponses();
@@ -96,4 +95,27 @@ Uint8List? validateCpuCardForDevice(CardSave card) {
     throw StateError('此卡是归档转储，无法作为 UID-only 卡上传。请在编辑数据中明确创建可容纳的模拟文件。');
   }
   return cpuFilesystemFromData(card.data, requireSingleAuthentication: true);
+}
+
+/// Check firmware and profile before disabling, changing or replacing the slot.
+Future<void> preflightHf14a4Slot(
+  ChameleonCommunicator communicator,
+  CardSave card,
+) async {
+  final image = validateCpuCardForDevice(card);
+  if (image == null) {
+    if (cpuRulesFromData(card.data).isEmpty) return;
+    final commands = await communicator.getDeviceCapabilities();
+    if (!commands.contains(ChameleonCommand.hf14a4StaticRead.value)) {
+      throw StateError('APDU table upload requires updated ISO-DEP firmware');
+    }
+    return;
+  }
+  final commands = await communicator.getDeviceCapabilities();
+  if (!commands.contains(ChameleonCommand.hf14a4Filesystem.value)) {
+    throw StateError('请先升级配套固件：当前设备缺少 CPU 文件系统命令 6009');
+  }
+  if (image[4] >= cpuFilesystemSecurityVersion) {
+    await communicator.hf14a4RequireFilesystemSecurity(version: image[4]);
+  }
 }

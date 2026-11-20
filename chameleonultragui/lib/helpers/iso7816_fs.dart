@@ -3,6 +3,8 @@ import 'dart:typed_data';
 import 'package:chameleonultragui/helpers/cpu_security.dart';
 
 const cpuFilesystemCapacity = 3252;
+const cpuFilesystemSecurityVersion = 2;
+const cpuFilesystemSm4Version = 3;
 const _magic = [0x43, 0x46, 0x53, 0x31];
 
 String _hex(List<int> bytes) =>
@@ -113,6 +115,12 @@ class CpuFileSystem {
   CpuFileSystem(List<CpuFileNode> nodes, {this.security})
     : nodes = List.unmodifiable(nodes);
 
+  int get imageVersion => security == null
+      ? 1
+      : security!.sm4Challenge == null
+      ? cpuFilesystemSecurityVersion
+      : cpuFilesystemSm4Version;
+
   bool get usesPinAuthentication => nodes.any((node) => node.access & 12 != 0);
   bool get usesKeyAuthentication => nodes.any((node) => node.access & 48 != 0);
   bool get hasLegacyMixedAuthentication =>
@@ -203,13 +211,7 @@ class CpuFileSystem {
     if (nodes.isEmpty || nodes.length > 16)
       throw const FormatException('文件系统需要 1–16 个节点');
     security?.validate(requireSingleMethod: !allowLegacyMixedAuthentication);
-    final bytes = <int>[
-      ..._magic,
-      security == null ? 1 : 2,
-      nodes.length,
-      0,
-      0,
-    ];
+    final bytes = <int>[..._magic, imageVersion, nodes.length, 0, 0];
     void u16(int n) {
       bytes.add(n >> 8);
       bytes.add(n & 255);
@@ -307,7 +309,8 @@ class CpuFileSystem {
     if (bytes.length < 8 ||
         bytes.length > cpuFilesystemCapacity ||
         !List.generate(4, (i) => bytes[i] == _magic[i]).every((v) => v) ||
-        ![1, 2].contains(bytes[4]) ||
+        bytes[4] < 1 ||
+        bytes[4] > cpuFilesystemSm4Version ||
         bytes[5] < 1 ||
         bytes[5] > 16 ||
         (bytes[6] << 8 | bytes[7]) != bytes.length)
@@ -346,10 +349,13 @@ class CpuFileSystem {
       );
     }
     CpuSecurity? security;
-    if (bytes[4] == 2) {
+    if (bytes[4] >= cpuFilesystemSecurityVersion) {
       if (offset + 44 != bytes.length)
         throw const FormatException('Truncated CFS security trailer');
-      security = CpuSecurity.decode(Uint8List.fromList(bytes.sublist(offset)));
+      security = CpuSecurity.decode(
+        bytes.sublist(offset),
+        sm4: bytes[4] == cpuFilesystemSm4Version,
+      );
       offset += 44;
     }
     if (offset != bytes.length) throw const FormatException('CFS1 镜像存在额外数据');
@@ -429,24 +435,35 @@ Future<Uint8List?> readCpuFilesystem(CpuFilesystemExchange exchange) async {
   return image;
 }
 
+Future<void> requireCpuFilesystemSecurity(
+  int imageVersion,
+  CpuFilesystemExchange exchange,
+) async {
+  if (imageVersion < cpuFilesystemSecurityVersion) return;
+  final sm4 = imageVersion == cpuFilesystemSm4Version;
+  final message = sm4
+      ? '请先升级配套固件：当前设备不支持 SM4 模拟认证（CFS v3）'
+      : '请先升级配套认证固件：当前设备不支持 PIN/DES 认证';
+  final mask = sm4 ? 4 : 3;
+  Uint8List capabilities;
+  try {
+    capabilities = await exchange(Uint8List.fromList([7]));
+  } catch (_) {
+    throw StateError(message);
+  }
+  if (capabilities.length != 2 ||
+      capabilities[0] < imageVersion ||
+      capabilities[1] & mask != mask) {
+    throw StateError(message);
+  }
+}
+
 Future<void> writeCpuFilesystem(
   Uint8List image,
   CpuFilesystemExchange exchange,
 ) async {
   CpuFileSystem.decode(image).requireSingleAuthentication();
-  if (image[4] == 2) {
-    Uint8List capabilities;
-    try {
-      capabilities = await exchange(Uint8List.fromList([7]));
-    } catch (_) {
-      throw StateError('请先升级配套认证固件：当前设备不支持 CFS v2');
-    }
-    if (capabilities.length != 2 ||
-        capabilities[0] < 2 ||
-        capabilities[1] & 3 != 3) {
-      throw StateError('请先升级配套认证固件：当前设备不支持 PIN/DES 认证');
-    }
-  }
+  await requireCpuFilesystemSecurity(image[4], exchange);
   final (_, capacity, _) = await _filesystemInfo(exchange);
   if (image.length > capacity) throw const FormatException('文件镜像超过设备容量');
   try {

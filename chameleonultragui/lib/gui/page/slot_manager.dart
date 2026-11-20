@@ -6,7 +6,6 @@ import 'package:chameleonultragui/gui/menu/dialogs/slot/settings.dart';
 import 'package:chameleonultragui/helpers/definitions.dart';
 import 'package:chameleonultragui/helpers/general.dart';
 import 'package:chameleonultragui/helpers/hf14a4_slot.dart';
-import 'package:chameleonultragui/helpers/iso14443_4.dart';
 import 'package:chameleonultragui/helpers/mifare_classic/general.dart';
 import 'package:chameleonultragui/helpers/mifare_ultralight/general.dart';
 import 'package:chameleonultragui/main.dart';
@@ -152,16 +151,7 @@ class SlotManagerPageState extends State<SlotManagerPage> {
       appState.changesMade();
       refreshSlot();
     } else if (card.tag == TagType.hf14a4) {
-      final image = validateCpuCardForDevice(card);
-      if (image == null) {
-        cpuRulesFromData(card.data);
-      } else if (!(await appState.communicator!.getDeviceCapabilities())
-          .contains(ChameleonCommand.hf14a4Filesystem.value)) {
-        throw StateError('请先升级配套固件：当前设备缺少 CPU 文件系统命令 6009');
-      }
-      if (image != null && image[4] == 2) {
-        await appState.communicator!.hf14a4RequireFilesystemSecurity();
-      }
+      await preflightHf14a4Slot(appState.communicator!, card);
       close(context, card.name);
       setUploadState(0);
       await appState.communicator!.setReaderDeviceMode(false);

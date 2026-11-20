@@ -30,6 +30,7 @@ jobs:
           lib/gui/page/slot_manager.dart lib/gui/page/read_card.dart lib/gui/page/tools.dart
           lib/gui/menu/tools/raw_commands.dart lib/helpers/ui_diagnostics.dart lib/main.dart
           lib/helpers/hf14a4_slot.dart lib/bridge/chameleon.dart
+          lib/helpers/sm4.dart
           lib/helpers/cpu_auth.dart lib/helpers/cpu_dump.dart lib/helpers/cpu_security.dart lib/helpers/slot_dump.dart lib/sharedprefsprovider.dart lib/gui/menu/dialogs/card/cpu_auth.dart lib/gui/menu/dialogs/card/cpu_dump.dart lib/gui/menu/dialogs/card/cpu_security.dart lib/gui/menu/dialogs/card/edit.dart lib/gui/menu/dialogs/card/view.dart lib/gui/menu/dialogs/slot/settings.dart lib/gui/menu/pages/cpu_data_editor.dart test/cpu_auth_test.dart test/cpu_native_test.dart
       - name: Build native library required by the full test suite
         run: |

@@ -1,13 +1,17 @@
 import 'dart:typed_data';
 
+import 'package:chameleonultragui/helpers/sm4.dart';
+
 class CpuSecurity {
   final String pin;
   final Uint8List key;
+  final CpuSm4Challenge? sm4Challenge;
   final int pinReference, keyReference, algorithm, pinEncoding;
   final int pinTries, keyTries, pinRemaining, keyRemaining;
   CpuSecurity({
     this.pin = '000000',
     List<int> key = const [],
+    this.sm4Challenge,
     this.pinReference = 0,
     this.keyReference = 0,
     this.algorithm = 0,
@@ -23,6 +27,8 @@ class CpuSecurity {
   void validate({bool requireSingleMethod = true}) {
     if ((pin.isNotEmpty && !RegExp(r'^\d{4,12}$').hasMatch(pin)) ||
         ![0, 8, 16].contains(key.length) ||
+        (sm4Challenge != null &&
+            (pin.isNotEmpty || key.length != sm4BlockSize)) ||
         (pin.isEmpty && key.isEmpty) ||
         (requireSingleMethod && pin.isNotEmpty && key.isNotEmpty) ||
         [pinReference, keyReference, algorithm].any((v) => v < 0 || v > 255) ||
@@ -64,15 +70,18 @@ class CpuSecurity {
     data.setRange(24, 24 + key.length, key);
     data[40] = pinEncoding;
     data[41] = algorithm;
+    data[42] = sm4Challenge?.wireCode ?? 0;
     return data;
   }
 
-  factory CpuSecurity.decode(Uint8List data) {
+  factory CpuSecurity.decode(Uint8List data, {bool sm4 = false}) {
     if (data.length != 44 ||
         String.fromCharCodes(data.take(4)) != 'SEC1' ||
         data[10] > 12 ||
         ![0, 8, 16].contains(data[11]) ||
-        data[42] != 0 ||
+        (sm4
+            ? !CpuSm4Challenge.values.any((v) => v.wireCode == data[42])
+            : data[42] != 0) ||
         data[43] != 0 ||
         (data[10] == 0 && (data[6] != 0 || data[8] != 0)) ||
         (data[11] == 0 && (data[7] != 0 || data[9] != 0))) {
@@ -81,6 +90,9 @@ class CpuSecurity {
     final result = CpuSecurity(
       pin: String.fromCharCodes(data.sublist(12, 12 + data[10])),
       key: data.sublist(24, 24 + data[11]),
+      sm4Challenge: sm4
+          ? CpuSm4Challenge.values.firstWhere((v) => v.wireCode == data[42])
+          : null,
       pinReference: data[4],
       keyReference: data[5],
       pinTries: data[6],
@@ -102,6 +114,7 @@ class CpuSecurity {
     'pinReference': pinReference,
     'keyReference': keyReference,
     'algorithm': algorithm,
+    if (sm4Challenge != null) 'sm4Challenge': sm4Challenge!.name,
     'pinEncoding': pinEncoding,
     'pinTries': pinTries,
     'keyTries': keyTries,
@@ -112,7 +125,7 @@ class CpuSecurity {
     final text = value['key'] ?? '';
     if (text is! String ||
         !RegExp(r'^(?:[a-fA-F0-9]{16}|[a-fA-F0-9]{32})?$').hasMatch(text)) {
-      throw const FormatException('Invalid DES / 2-key 3DES key');
+      throw const FormatException('Invalid DES / 2-key 3DES / SM4 key');
     }
     int number(String key, int fallback) {
       final result = value[key] ?? fallback;
@@ -123,8 +136,16 @@ class CpuSecurity {
 
     final pin = value['pin'] ?? '';
     if (pin is! String) throw const FormatException('Expected decimal PIN');
+    final layout = value['sm4Challenge'];
+    final sm4Challenge = CpuSm4Challenge.values
+        .where((v) => v.name == layout)
+        .firstOrNull;
+    if (layout != null && sm4Challenge == null) {
+      throw const FormatException('Unknown SM4 challenge format');
+    }
     final result = CpuSecurity(
       pin: pin,
+      sm4Challenge: sm4Challenge,
       key: [
         for (var i = 0; i < text.length; i += 2)
           int.parse(text.substring(i, i + 2), radix: 16),

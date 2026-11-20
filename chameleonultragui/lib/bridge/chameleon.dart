@@ -1589,13 +1589,9 @@ class ChameleonCommunicator {
     return result;
   }
 
-  Future<void> hf14a4RequireFilesystemSecurity() async {
-    final capabilities = await _cpuCommand(ChameleonCommand.hf14a4Filesystem,
-      data: Uint8List.fromList([7]));
-    if (capabilities.length != 2 || capabilities[0] < 2 || (capabilities[1] & 3) != 3) {
-      throw StateError('请先升级配套认证固件：当前设备不支持 CFS v2 PIN/DES 认证');
-    }
-  }
+  Future<void> hf14a4RequireFilesystemSecurity({int version = cpuFilesystemSecurityVersion}) =>
+      requireCpuFilesystemSecurity(version, (data) =>
+        _cpuCommand(ChameleonCommand.hf14a4Filesystem, data: data));
 
   Future<Uint8List?> hf14a4ReadFilesystem() => readCpuFilesystem((data) =>
       _cpuCommand(ChameleonCommand.hf14a4Filesystem, data: data));
